@@ -5,11 +5,10 @@ from pathlib import Path
 from datetime import datetime
 from xml.sax.saxutils import escape
 
-# !! UPDATE THIS to your actual GitHub Pages URL !!
 SITE_URL = "https://chibimedia.github.io/bunkr-index"
 
-data = json.loads(Path("albums.json").read_text())
-albums = data.get("albums", [])[:50]
+data    = json.loads(Path("albums.json").read_text())
+albums  = data.get("albums", [])[:50]
 updated = data.get("meta", {}).get("last_updated", datetime.utcnow().isoformat())
 
 items = []
