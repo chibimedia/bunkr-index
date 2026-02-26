@@ -5,40 +5,20 @@ on:
     - cron: "0 */6 * * *"
   workflow_dispatch:
     inputs:
-      max_albums:
-        description: "Max new records per run"
-        default: "500"
+      max_per_source:
+        description: "Max records per source (default 1000)"
+        default: "1000"
         required: false
-      enable_bunkr:
-        description: "Enable Bunkr (playwright, slow)"
-        default: "false"
-        type: choice
-        options: ["true", "false"]
-      enable_fapello:
-        description: "Enable Fapello (cloudscraper)"
-        default: "true"
-        type: choice
-        options: ["true", "false"]
-      enable_kemono:
-        description: "Enable Kemono (API)"
-        default: "true"
-        type: choice
-        options: ["true", "false"]
-      enable_eporner:
-        description: "Enable Eporner (API)"
-        default: "true"
-        type: choice
-        options: ["true", "false"]
-      enable_erome:
-        description: "Enable Erome"
+      enable_coomer:
+        description: "Enable Coomer.su"
         default: "true"
         type: choice
         options: ["true", "false"]
       force_commit:
-        description: "Force commit even if guard triggers"
+        description: "Bypass commit guard (for debugging)"
         default: "false"
         type: choice
-        options: ["true", "false"]
+        options: ["false", "true"]
 
 permissions:
   contents: write
@@ -46,103 +26,51 @@ permissions:
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 45
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 1
 
-      - name: Set up Python 3.12
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: "pip"
 
-      - name: Install Python dependencies
-        run: |
-          pip install --upgrade pip
-          pip install \
-            requests>=2.32.0 \
-            cloudscraper>=1.2.71 \
-            brotlicffi>=1.0.0 \
-            beautifulsoup4>=4.12.0 \
-            lxml>=5.1.0
-          echo "✓ Core dependencies installed"
-
-      # Node.js helps cloudscraper solve newer CF challenges
-      - name: Install Node.js (improves cloudscraper CF solving)
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-
-      # Playwright only needed for Bunkr or Erome fallback
-      - name: Install Playwright + Chrome
-        if: ${{ github.event.inputs.enable_bunkr == 'true' || github.event_name == 'schedule' }}
-        run: |
-          pip install playwright
-          playwright install chromium --with-deps
-          echo "✓ Playwright + Chromium installed"
-
-      - name: Create required directories
-        run: |
-          mkdir -p cache debug/{fapello,kemono,eporner,erome,bunkr,cyberdrop}
-          mkdir -p scrapers samples/{fapello,kemono,eporner,erome,cyberdrop}
+      - name: Install dependencies
+        run: pip install requests
 
       - name: Run scraper
         env:
-          MAX_ALBUMS:       ${{ github.event.inputs.max_albums || '500' }}
-          ENABLE_BUNKR:     ${{ github.event.inputs.enable_bunkr || 'false' }}
-          ENABLE_FAPELLO:   ${{ github.event.inputs.enable_fapello || 'true' }}
-          ENABLE_KEMONO:    ${{ github.event.inputs.enable_kemono || 'true' }}
-          ENABLE_EPORNER:   ${{ github.event.inputs.enable_eporner || 'true' }}
-          ENABLE_EROME:     ${{ github.event.inputs.enable_erome || 'true' }}
-          ENABLE_CYBERDROP: "false"
-          FORCE_COMMIT:     ${{ github.event.inputs.force_commit || 'false' }}
-          DELAY_MIN:        "2.0"
-          DELAY_MAX:        "4.5"
-          DEBUG_NO_CACHE:   "false"
+          MAX_PER_SOURCE: ${{ github.event.inputs.max_per_source || '1000' }}
+          ENABLE_KEMONO:  "true"
+          ENABLE_COOMER:  ${{ github.event.inputs.enable_coomer || 'true' }}
+          ENABLE_EPORNER: "true"
+          FORCE_COMMIT:   ${{ github.event.inputs.force_commit || 'false' }}
+          DELAY:          "1.5"
         run: python scraper.py
 
-      - name: Generate RSS
-        run: python generate_rss.py
-        continue-on-error: true  # Don't fail the whole run if RSS generation fails
-
-      # ALWAYS upload debug artifacts so you can see what CI received
-      - name: Upload debug artifacts
+      # Always upload so you can inspect what ran
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: scraper-debug-${{ github.run_number }}
+          name: run-${{ github.run_number }}
           path: |
-            debug/
-            validation.json
-            recheck.json
             albums.json
+            validation.json
           retention-days: 14
 
-      - name: Commit results
+      - name: Commit
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          TOTAL=0
-          NEW=0
-          PLACEHOLDER=0
-          if [ -f validation.json ]; then
-            TOTAL=$(python -c "import json; print(json.load(open('validation.json')).get('total',0))")
-            NEW=$(python -c "import json; print(json.load(open('validation.json')).get('new_this_run',0))")
-            PLACEHOLDER=$(python -c "import json; print(json.load(open('validation.json')).get('placeholder_count',0))")
-          fi
+          TOTAL=$(python -c "import json; d=json.load(open('validation.json')); print(d.get('total',0))" 2>/dev/null || echo 0)
+          NEW=$(python   -c "import json; d=json.load(open('validation.json')); print(d.get('new_this_run',0))" 2>/dev/null || echo 0)
 
-          echo "Total: $TOTAL | New: $NEW | Placeholders: $PLACEHOLDER"
-
-          git add albums.json feed.xml recheck.json validation.json 2>/dev/null || true
-
-          if git diff --staged --quiet; then
-            echo "No changes to commit."
-          else
-            git commit -m "index: ${TOTAL} albums (+${NEW} new, ${PLACEHOLDER} placeholder) [skip ci]"
-            git push
-          fi
+          git add albums.json validation.json
+          git diff --staged --quiet && echo "No changes to commit." && exit 0
+          git commit -m "index: ${TOTAL} records (+${NEW} new) [skip ci]"
+          git push
