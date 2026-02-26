@@ -2,15 +2,15 @@ name: Scrape & Index Albums
 
 on:
   schedule:
-    - cron: "0 */6 * * *"   # every 6 hours
+    - cron: "0 */6 * * *"
   workflow_dispatch:
     inputs:
       max_albums:
-        description: "Max new items to index per run"
+        description: "Max new items per run"
         required: false
         default: "500"
       enable_bunkr:
-        description: "Enable Bunkr scraping (needs stealth browser)"
+        description: "Enable Bunkr scraping (nodriver)"
         required: false
         default: "true"
         type: choice
@@ -36,36 +36,82 @@ jobs:
           python-version: "3.12"
           cache: "pip"
 
-      - name: Install Python dependencies
-        run: pip install -r requirements.txt
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          echo "✓ Python deps installed"
 
-      # Only install browser if Bunkr scraping is enabled
-      - name: Install patchright Chromium (for Bunkr stealth scraping)
+      # nodriver needs Chrome — install it explicitly
+      - name: Install Chrome for nodriver
         if: ${{ github.event.inputs.enable_bunkr != 'false' }}
-        run: patchright install chromium --with-deps
+        run: |
+          wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | sudo apt-key add -
+          echo "deb [arch=amd64] https://dl.google.com/linux/chrome/deb/ stable main" | \
+            sudo tee /etc/apt/sources.list.d/google-chrome.list
+          sudo apt-get update -q
+          sudo apt-get install -y google-chrome-stable
+          google-chrome --version
+          echo "✓ Chrome installed"
+
+      # nodriver requires a display even in headless mode on some CI envs
+      - name: Install Xvfb (virtual display for nodriver)
+        if: ${{ github.event.inputs.enable_bunkr != 'false' }}
+        run: |
+          sudo apt-get install -y xvfb
+          Xvfb :99 -screen 0 1920x1080x24 &
+          echo "DISPLAY=:99" >> $GITHUB_ENV
+          echo "✓ Xvfb started on :99"
 
       - name: Run scraper
         env:
-          MAX_ALBUMS:    ${{ github.event.inputs.max_albums || '500' }}
-          ENABLE_BUNKR:  ${{ github.event.inputs.enable_bunkr || 'true' }}
-          HEADLESS:      "true"
-          DELAY_MIN:     "1.5"
-          DELAY_MAX:     "3.0"
+          MAX_ALBUMS:   ${{ github.event.inputs.max_albums || '500' }}
+          ENABLE_BUNKR: ${{ github.event.inputs.enable_bunkr || 'true' }}
+          DELAY_MIN:    "2.0"
+          DELAY_MAX:    "4.5"
         run: python scraper.py
 
-      - name: Generate RSS feed
+      - name: Generate RSS
         run: python generate_rss.py
+
+      # Upload debug/ folder as an artifact — if CF is blocking you,
+      # download this artifact after the run to see the exact HTML received
+      - name: Upload debug artifacts
+        uses: actions/upload-artifact@v4
+        if: always()   # upload even if scraper failed
+        with:
+          name: scraper-debug-${{ github.run_number }}
+          path: |
+            debug/
+            albums.json
+          retention-days: 7
 
       - name: Commit results
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add albums.json feed.xml
+
+          TOTAL=$(python -c "
+          import json, sys
+          try:
+              d = json.load(open('albums.json'))
+              print(d['meta']['total'])
+          except:
+              print(0)
+          ")
+          NEW=$(python -c "
+          import json, sys
+          try:
+              d = json.load(open('albums.json'))
+              print(d['meta']['new_this_run'])
+          except:
+              print(0)
+          ")
+
           if git diff --staged --quiet; then
             echo "No changes to commit."
           else
-            TOTAL=$(python -c "import json; d=json.load(open('albums.json')); print(d['meta']['total'])")
-            NEW=$(python -c "import json; d=json.load(open('albums.json')); print(d['meta']['new_this_run'])")
             git commit -m "index: ${TOTAL} albums (+${NEW} new) [skip ci]"
             git push
           fi
