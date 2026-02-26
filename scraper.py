@@ -1,304 +1,214 @@
 #!/usr/bin/env python3
-"""
-MediaIndex scraper v9
-
-Sources:
-  1. Eporner — pornstar profiles (name + video count), scraped from /pornstar-list/
-  2. Kemono.su / Coomer.su — creator list from /api/v1/creators.txt (bulk endpoint)
-
-Eporner approach:
-  - Scrape /pornstar-list/?sort=most-popular&page=N to get model names + slugs
-  - Use API search with name to get video count per model
-  - Record = one entry per model (not per video)
-
-Kemono/Coomer approach:
-  - GET /api/v1/creators.txt — returns ALL creators as JSON array in one shot
-  - Fields: id, name, service, indexed, updated, public_id
-  - No pagination needed, no rate limit issues
-  - Record = one entry per creator
-"""
-
+# scraper.py — orchestration (safe, uses fetcher tiered HTTP)
+from __future__ import annotations
 import json
 import logging
 import os
-import random
-import re
 import sys
-import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, List, Optional
 
-import requests
-from bs4 import BeautifulSoup
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S")
+log = logging.getLogger("scraper")
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    datefmt="%H:%M:%S",
-)
-log = logging.getLogger(__name__)
+HERE = Path(__file__).parent.resolve()
+OUT_FILE = HERE / "albums.json"
+VALIDATION_FILE = HERE / "validation.json"
+DEBUG_DIR = HERE / "debug"
+DEBUG_DIR.mkdir(exist_ok=True)
 
-OUT_FILE       = Path("albums.json")
-VALIDATION     = Path("validation.json")
-MAX_MODELS     = int(os.getenv("MAX_MODELS", "2000"))
-DELAY          = float(os.getenv("DELAY", "2.0"))
-FORCE_COMMIT   = os.getenv("FORCE_COMMIT", "false").lower() == "true"
-ENABLE_KEMONO  = os.getenv("ENABLE_KEMONO",  "true").lower() != "false"
-ENABLE_COOMER  = os.getenv("ENABLE_COOMER",  "true").lower() != "false"
+MAX_MODELS = int(os.getenv("MAX_MODELS", "2000"))
+DELAY = float(os.getenv("DELAY", "2.0"))
+FORCE_COMMIT = os.getenv("FORCE_COMMIT", "false").lower() == "true"
+
+# defaults (can be toggled via env)
+ENABLE_KEMONO = os.getenv("ENABLE_KEMONO", "true").lower() != "false"
+ENABLE_COOMER = os.getenv("ENABLE_COOMER", "true").lower() != "false"
 ENABLE_EPORNER = os.getenv("ENABLE_EPORNER", "true").lower() != "false"
 
+# Titles we consider placeholders
 DENYLIST = {
-    "", "just a moment", "checking your browser", "access denied",
-    "403", "forbidden", "welcome", "welcome!", "error", "503",
-    "attention required", "cloudflare", "untitled",
+    "", "just a moment", "checking your browser", "access denied", "403", "forbidden",
+    "welcome", "welcome!", "error", "503", "attention required", "cloudflare", "untitled",
 }
+
+def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 def is_placeholder(title: str) -> bool:
     t = (title or "").strip().lower()
     return t in DENYLIST or len(t) < 2
 
-def now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+# Try to import fetcher (tiered fetch). If missing, fall back to requests.
+try:
+    import fetcher  # project file fetcher.py — provides fetch, fetch_json, is_cf_block, save_debug
+    _have_fetcher = True
+    log.info("Using local fetcher (tiered fetch: requests -> cloudscraper -> playwright)")
+except Exception:
+    _have_fetcher = False
+    import requests
+    log.warning("fetcher.py not available — falling back to requests (less reliable)")
 
+# -------------------- Helpers for HTTP using fetcher when possible --------------------
+def fetch_json(url: str, **kwargs) -> Optional[dict | list]:
+    if _have_fetcher:
+        return fetcher.fetch_json(url, **kwargs)
+    try:
+        r = requests.get(url, timeout=30, headers={"Accept": "application/json"})
+        if r.status_code == 200:
+            return r.json()
+    except Exception as e:
+        log.debug(f"[fallback json] {e}")
+    return None
 
-# ── HTTP ───────────────────────────────────────────────────────────────────────
-_sess = requests.Session()
-_sess.headers.update({
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/122.0.0.0 Safari/537.36"
-    ),
-    "Accept-Language": "en-US,en;q=0.9",
-})
-
-def get_json(url: str, retries: int = 3) -> Optional[dict | list]:
-    for attempt in range(1, retries + 1):
-        time.sleep(DELAY + random.uniform(0, 0.5))
-        try:
-            r = _sess.get(url, timeout=30, headers={"Accept": "application/json"})
-            log.debug(f"GET {url} → {r.status_code}")
-            if r.status_code == 200:
-                return r.json()
-            elif r.status_code == 429:
-                wait = 45 + attempt * 15
-                log.warning(f"429 rate-limited — sleeping {wait}s")
-                time.sleep(wait)
-            elif r.status_code in (403, 503):
-                log.warning(f"HTTP {r.status_code} on {url} (attempt {attempt})")
-                time.sleep(10 + attempt * 5)
-            elif r.status_code == 404:
+def fetch_html(url: str, site: str = "unknown", slug: str = "", prefer_cs: bool = False, force_playwright: bool = False, **kwargs) -> Optional[str]:
+    """
+    Fetch HTML using fetcher.fetch (auto tier). Returns None on failure or CF detection.
+    """
+    if _have_fetcher:
+        txt = fetcher.fetch(url, site=site, slug=slug, prefer_cs=prefer_cs, force_playwright=force_playwright)
+        # fetcher already saves debug on CF and returns None if blocked
+        return txt
+    # fallback: simple requests
+    try:
+        r = requests.get(url, timeout=30, headers={"User-Agent": "Mozilla/5.0"})
+        if r.status_code == 200:
+            txt = r.text
+            low = (txt or "").lower()
+            if "checking your browser" in low or "just a moment" in low or len(txt) < 500:
+                # consider blocked
+                log.warning(f"[fallback] CF-like response for {url}")
+                try:
+                    p = DEBUG_DIR / f"fallback_{site}_{slug or 'page'}.html"
+                    p.write_text(txt, encoding="utf-8", errors="replace")
+                    log.info(f"[fallback] saved debug to {p}")
+                except Exception:
+                    pass
                 return None
-            else:
-                log.warning(f"HTTP {r.status_code}: {url}")
-        except Exception as e:
-            log.warning(f"Request error attempt {attempt}: {e}")
-        if attempt < retries:
-            time.sleep(2 ** attempt)
+            return txt
+    except Exception as e:
+        log.warning(f"[fallback] fetch_html error: {e}")
     return None
 
-def get_html(url: str, retries: int = 3) -> Optional[str]:
-    for attempt in range(1, retries + 1):
-        time.sleep(DELAY + random.uniform(0, 0.5))
-        try:
-            r = _sess.get(url, timeout=30, headers={"Accept": "text/html"})
-            log.debug(f"GET {url} → {r.status_code} ({len(r.content)}B)")
-            if r.status_code == 200:
-                # Basic CF check
-                if len(r.text) < 3000 and "checking your browser" in r.text.lower():
-                    log.warning(f"CF block detected on {url}")
-                    return None
-                return r.text
-            elif r.status_code == 429:
-                time.sleep(45 + attempt * 15)
-            else:
-                log.warning(f"HTTP {r.status_code}: {url}")
-        except Exception as e:
-            log.warning(f"Request error attempt {attempt}: {e}")
-        if attempt < retries:
-            time.sleep(2 ** attempt)
-    return None
-
-
-# ── Persistence ────────────────────────────────────────────────────────────────
-def load_existing() -> dict[str, dict]:
+# -------------------- Persistence helpers --------------------
+def load_existing() -> Dict[str, Dict[str, Any]]:
     if OUT_FILE.exists():
         try:
-            data = json.loads(OUT_FILE.read_text())
-            existing = {a["id"]: a for a in data.get("albums", [])}
-            log.info(f"Loaded {len(existing)} existing records")
-            return existing
-        except Exception as e:
-            log.warning(f"Could not load albums.json: {e}")
+            j = json.loads(OUT_FILE.read_text(encoding="utf-8"))
+            return {a["id"]: a for a in j.get("albums", [])}
+        except Exception:
+            log.exception("Failed to read existing albums.json — starting fresh")
+            return {}
     return {}
 
-def save(albums: dict, new_count: int) -> dict:
-    rows = sorted(
-        albums.values(),
-        key=lambda a: a.get("date") or a.get("indexed_at") or "",
-        reverse=True,
-    )
+def save(albums: Dict[str, Dict[str, Any]], new_count: int) -> Dict[str, Any]:
+    rows = sorted(albums.values(), key=lambda a: a.get("date") or a.get("indexed_at") or "", reverse=True)
     ph = sum(1 for a in rows if is_placeholder(a.get("title", "")))
     meta = {
-        "total":             len(rows),
-        "new_this_run":      new_count,
+        "total": len(rows),
+        "new_this_run": new_count,
         "placeholder_count": ph,
-        "last_updated":      now_iso(),
-        "sources":           sorted({a.get("source", "?") for a in rows}),
+        "last_updated": now_iso(),
+        "sources": sorted({a.get("source") or "?" for a in rows}),
     }
-    OUT_FILE.write_text(json.dumps({"meta": meta, "albums": rows},
-                                    ensure_ascii=False, indent=2))
-    per_src = {f"{s}_count": sum(1 for a in rows if a.get("source") == s)
-               for s in ["kemono", "coomer", "eporner"]}
-    VALIDATION.write_text(json.dumps({**meta, **per_src}, indent=2))
+    OUT_FILE.write_text(json.dumps({"meta": meta, "albums": rows}, ensure_ascii=False, indent=2), encoding="utf-8")
+    # per-source quick counts
+    per_src = {f"{s}_count": sum(1 for a in rows if a.get("source") == s) for s in ["kemono", "coomer", "eporner"]}
+    VALIDATION_FILE.write_text(json.dumps({**meta, **per_src}, indent=2), encoding="utf-8")
     log.info(f"✓ {len(rows)} total | {new_count} new | {ph} placeholders")
     return meta
 
+# -------------------- EPORNER scraping (uses fetch_html) --------------------
+from bs4 import BeautifulSoup
+import re
 
-# ══════════════════════════════════════════════════════════════════════════════
-# SOURCE 1: Eporner — pornstar profiles
-# ══════════════════════════════════════════════════════════════════════════════
-def scrape_eporner_models(max_models: int) -> list[dict]:
-    """
-    Scrape eporner.com/pornstar-list/ for model profiles.
-    Each record = one model with name + total video count + profile URL.
-
-    Page structure:
-      /pornstar-list/?sort=most-popular&page=N
-      Each model card: <a href="/pornstar/{name}-{id}/">
-        <h3> or <p> with the name
-        A video count like "123 Videos"
-    """
-    records = []
-    seen    = set()
-    page    = 1
-
+def scrape_eporner_models(max_models: int) -> List[Dict[str, Any]]:
+    """Scrape eporner.com/pornstar-list/?sort=most-popular&page=N for performer cards."""
+    records: List[Dict[str, Any]] = []
+    seen = set()
+    page = 1
     log.info(f"[eporner] Scraping pornstar profiles (target: {max_models})")
-
     while len(records) < max_models:
-        url  = f"https://www.eporner.com/pornstar-list/?sort=most-popular&page={page}"
-        html = get_html(url)
-
+        url = f"https://www.eporner.com/pornstar-list/?sort=most-popular&page={page}"
+        html = fetch_html(url, site="eporner", slug=f"list-{page}", prefer_cs=False)
         if not html:
-            log.warning(f"[eporner] No HTML on page {page}, stopping")
+            log.warning(f"[eporner] No HTML on page {page} (maybe blocked); stopping")
             break
-
         soup = BeautifulSoup(html, "html.parser")
-
-        # Each pornstar card is an <a> with href matching /pornstar/name-id/
+        # Each pornstar link: href like /pornstar/<slug>-<id>/
         cards = soup.find_all("a", href=re.compile(r"^/pornstar/[^/]+-\w{5}/"))
         if not cards:
-            log.info(f"[eporner] No cards on page {page}, done")
+            log.info(f"[eporner] No cards found on page {page}, stopping")
             break
-
         new_here = 0
         for card in cards:
             href = card.get("href", "")
-            # Extract slug and ID from href like /pornstar/mia-malkova-oPgtJ/
             m = re.match(r"/pornstar/(.+)-(\w{5})/?$", href)
             if not m:
                 continue
-
-            slug   = m.group(1)   # e.g. "mia-malkova"
-            ps_id  = m.group(2)   # e.g. "oPgtJ"
-            rid    = f"eporner:ps:{ps_id}"
-
+            slug = m.group(1)
+            ps_id = m.group(2)
+            rid = f"eporner:ps:{ps_id}"
             if rid in seen:
                 continue
             seen.add(rid)
-
-            # Model name: from h3, or convert slug
             name_tag = card.find(["h3", "p", "span"])
-            if name_tag:
-                name = name_tag.get_text(strip=True)
-            else:
-                name = slug.replace("-", " ").title()
-
+            name = name_tag.get_text(strip=True) if name_tag else slug.replace("-", " ").title()
             if is_placeholder(name):
                 continue
-
-            # Video count: look for "NNN Videos" text in the card
             card_text = card.get_text(" ", strip=True)
-            vc_match  = re.search(r"([\d,]+)\s+videos?", card_text, re.I)
-            video_count = 0
-            if vc_match:
-                video_count = int(vc_match.group(1).replace(",", ""))
-
-            records.append({
-                "id":         rid,
-                "title":      name,
-                "source":     "eporner",
-                "url":        f"https://www.eporner.com/pornstar/{slug}-{ps_id}/",
+            vc_match = re.search(r"([\d,]+)\s+videos?", card_text, re.I)
+            video_count = int(vc_match.group(1).replace(",", "")) if vc_match else 0
+            rec = {
+                "id": rid,
+                "title": name,
+                "source": "eporner",
+                "url": f"https://www.eporner.com/pornstar/{slug}-{ps_id}/",
                 "file_count": video_count,
-                "has_videos": True,
-                "date":       None,
+                "has_videos": bool(video_count),
+                "date": None,
                 "indexed_at": now_iso(),
-            })
+            }
+            records.append(rec)
             new_here += 1
-
+            if len(records) >= max_models:
+                break
         log.info(f"[eporner] page {page}: {new_here} new models ({len(records)} total)")
-
         if new_here == 0:
             break
         page += 1
-
     log.info(f"[eporner] Done: {len(records)} models")
     return records
 
-
-# ══════════════════════════════════════════════════════════════════════════════
-# SOURCE 2: Kemono / Coomer — creator list
-# ══════════════════════════════════════════════════════════════════════════════
-def scrape_kemono_creators(base_url: str, source_name: str, max_creators: int) -> list[dict]:
-    """
-    Fetch all creators from Kemono/Coomer using the bulk creators endpoint.
-
-    GET {base_url}/api/v1/creators.txt
-    Returns: JSON array of creator objects:
-      {id, name, service, indexed, updated, public_id}
-
-    This is a single request for ALL creators — no pagination, no rate limit issues.
-    Much more reliable than /posts/recently-updated from CI IPs.
-    """
+# -------------------- Kemono / Coomer (bulk JSON) --------------------
+def scrape_kemono_creators(base_url: str, source_name: str, max_creators: int) -> List[Dict[str, Any]]:
     log.info(f"[{source_name}] Fetching creators list from {base_url}")
-
-    url  = f"{base_url}/api/v1/creators.txt"
-    data = get_json(url)
-
+    url = f"{base_url}/api/v1/creators.txt"
+    data = fetch_json(url)
     if not data:
         log.error(f"[{source_name}] Failed to fetch creators.txt — got no data")
-        log.error(f"[{source_name}] This is why 0 records: CI IP may be rate-limited")
         return []
-
     if not isinstance(data, list):
         log.error(f"[{source_name}] Unexpected response type: {type(data)}")
         return []
-
-    log.info(f"[{source_name}] Got {len(data)} total creators")
-
-    records = []
-    seen    = set()
-
+    records: List[Dict[str, Any]] = []
+    seen = set()
     for creator in data[:max_creators]:
         try:
-            cid   = str(creator.get("id", ""))
-            name  = (creator.get("name") or "").strip()
-            svc   = str(creator.get("service", ""))
+            cid = str(creator.get("id", ""))
+            name = (creator.get("name") or "").strip()
+            svc = str(creator.get("service") or "")
             indexed = creator.get("indexed")
             updated = creator.get("updated")
-
             if is_placeholder(name) or not cid:
                 continue
-
             rid = f"{source_name}:{svc}:{cid}"
             if rid in seen:
                 continue
             seen.add(rid)
-
-            # Parse date from indexed/updated
             date_str = None
-            for raw in [updated, indexed]:
+            for raw in (updated, indexed):
                 if raw:
                     try:
                         dt = datetime.fromisoformat(str(raw).replace(" ", "T"))
@@ -308,37 +218,31 @@ def scrape_kemono_creators(base_url: str, source_name: str, max_creators: int) -
                         break
                     except Exception:
                         pass
-
             records.append({
-                "id":         rid,
-                "title":      name,
-                "source":     source_name,
-                "service":    svc,
-                "url":        f"{base_url}/{svc}/user/{cid}",
-                "file_count": 0,   # creator list doesn't include post count
+                "id": rid,
+                "title": name,
+                "source": source_name,
+                "service": svc,
+                "url": f"{base_url}/{svc}/user/{cid}",
+                "file_count": 0,
                 "has_videos": False,
-                "date":       date_str,
+                "date": date_str,
                 "indexed_at": now_iso(),
             })
-
         except Exception as e:
             log.warning(f"[{source_name}] Parse error: {e}")
-
     log.info(f"[{source_name}] Done: {len(records)} creators")
     return records
 
-
-# ══════════════════════════════════════════════════════════════════════════════
-# MAIN
-# ══════════════════════════════════════════════════════════════════════════════
+# -------------------- Main orchestration --------------------
 def main():
     log.info("=" * 60)
-    log.info("MediaIndex scraper v9")
-    log.info(f"  eporner={ENABLE_EPORNER} kemono={ENABLE_KEMONO} coomer={ENABLE_COOMER}")
-    log.info(f"  max_models={MAX_MODELS}")
+    log.info("MediaIndex scraper (audited) — using fetcher.js where available")
+    log.info(f" eporner={ENABLE_EPORNER} kemono={ENABLE_KEMONO} coomer={ENABLE_COOMER}")
+    log.info(f" max_models={MAX_MODELS}")
     log.info("=" * 60)
 
-    albums    = load_existing()
+    albums = load_existing()
     new_count = 0
 
     if ENABLE_EPORNER:
@@ -360,10 +264,8 @@ def main():
                 new_count += 1
 
     meta = save(albums, new_count)
-
     total = meta["total"]
-    ph    = meta["placeholder_count"]
-
+    ph = meta["placeholder_count"]
     if not FORCE_COMMIT:
         if total == 0:
             log.error("COMMIT GUARD: 0 records — not committing")
@@ -373,7 +275,6 @@ def main():
             sys.exit(1)
 
     log.info(f"✓ Safe to commit: {total} records, {new_count} new, {ph} placeholders")
-
 
 if __name__ == "__main__":
     main()
