@@ -6,7 +6,7 @@ from pathlib import Path
 from datetime import datetime
 from xml.sax.saxutils import escape
 
-SITE_URL = "https://YOUR_USERNAME.github.io/bunkr-index"  # update this
+SITE_URL = "https://chibimedia.github.io/bunkr-index"  # update this
 
 albums_data = json.loads(Path("albums.json").read_text())
 albums = albums_data.get("albums", [])[:50]
