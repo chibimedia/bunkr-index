@@ -2,14 +2,13 @@ name: Scrape & Index Albums
 
 on:
   schedule:
-    # Every 6 hours
-    - cron: "0 */6 * * *"
+    - cron: "0 */6 * * *"   # every 6 hours
   workflow_dispatch:
     inputs:
       max_albums:
-        description: "Max new albums to index per run"
+        description: "Max new albums to index per run (default 300)"
         required: false
-        default: "500"
+        default: "300"
 
 permissions:
   contents: write
@@ -17,7 +16,7 @@ permissions:
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
 
     steps:
       - name: Checkout repo
@@ -25,7 +24,7 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: Set up Python
+      - name: Set up Python 3.12
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -36,14 +35,14 @@ jobs:
 
       - name: Run scraper
         env:
-          MAX_ALBUMS: ${{ github.event.inputs.max_albums || '500' }}
+          MAX_ALBUMS: ${{ github.event.inputs.max_albums || '300' }}
           REQUEST_DELAY: "1.5"
         run: python scraper.py
 
       - name: Generate RSS feed
         run: python generate_rss.py
 
-      - name: Commit updated albums.json & feed.xml
+      - name: Commit results
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -53,6 +52,6 @@ jobs:
           else
             TOTAL=$(python -c "import json; d=json.load(open('albums.json')); print(d['meta']['total'])")
             NEW=$(python -c "import json; d=json.load(open('albums.json')); print(d['meta']['new_this_run'])")
-            git commit -m "chore: index update — ${TOTAL} total, +${NEW} new [skip ci]"
+            git commit -m "index: ${TOTAL} albums (+${NEW} new) [skip ci]"
             git push
           fi
