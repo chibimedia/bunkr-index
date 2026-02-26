@@ -1,138 +1,80 @@
-# BunkrIndex — Self-Hosted Album Discovery Site
+# BunkrIndex v2
 
-A fully automated, free, GitHub Pages-hosted searchable index of Bunkr albums.  
-**No servers. No costs. Auto-updates every 6 hours.**
+Fully automated, free, GitHub Pages-hosted searchable index of Bunkr albums.
+
+## ⚠️ Critical fixes in v2 (why v1 returned 0 albums)
+
+1. **Wrong API assumption** — `apidl.bunkr.ru/api/_001_v2` is for resolving individual *file* CDN URLs, **not** a listing/browse API. There is no public "browse all albums" Bunkr API.
+
+2. **Correct strategy**: Scrape **bunkr-albums.io** (the actual directory site) for album IDs and metadata, then optionally enrich via `bunkr.si/a/{id}?advanced=1`.
+
+3. **Workflow file location was wrong** — must be at `.github/workflows/scrape.yml`, not `scrape.yml` at repo root.
 
 ---
 
-## 🗂 Project Structure
+## Project structure
 
 ```
 bunkr-index/
 ├── .github/
 │   └── workflows/
-│       └── scrape.yml      ← GitHub Actions automation
-├── scraper.py              ← Metadata-only scraper (no downloads)
-├── generate_rss.py         ← RSS feed generator
-├── requirements.txt        ← Python deps
-├── albums.json             ← Auto-generated index (committed by bot)
-├── feed.xml                ← RSS feed (auto-generated)
-└── index.html              ← Static frontend (served by GitHub Pages)
+│       └── scrape.yml       ← MUST be here (not at repo root)
+├── scraper.py               ← Correct scraper using bunkr-albums.io
+├── generate_rss.py
+├── requirements.txt
+├── albums.json              ← Auto-updated by Actions
+├── feed.xml
+└── index.html               ← GitHub Pages frontend
 ```
 
 ---
 
-## 🚀 Deployment (5 minutes)
+## Deploy to your repo (chibimedia/bunkr-index)
 
-### Step 1 — Fork / create repo
+### 1. Update all files
+Upload/replace all files from this package. The **critical** one is the correct path:
+- Delete old `scrape.yml` from **repo root**
+- Upload `scrape.yml` to `.github/workflows/scrape.yml`
 
-1. Create a new **public** GitHub repo (e.g. `bunkr-index`).
-2. Upload all files from this project into it.
-
-### Step 2 — Enable GitHub Pages
-
-1. Go to **Settings → Pages**
-2. Source: **Deploy from a branch**
-3. Branch: `main` / `(root)`
-4. Click **Save**
-
-Your site will be live at:  
-`https://YOUR_USERNAME.github.io/bunkr-index/`
-
-### Step 3 — Update the RSS site URL
-
-Edit `generate_rss.py` and change:
+### 2. Update RSS URL
+In `generate_rss.py`, confirm:
 ```python
-SITE_URL = "https://YOUR_USERNAME.github.io/bunkr-index"
+SITE_URL = "https://chibimedia.github.io/bunkr-index"
 ```
 
-### Step 4 — Trigger the first scrape
+### 3. Enable GitHub Pages
+Settings → Pages → Deploy from branch → `main` / `(root)` → Save
 
-1. Go to **Actions → Scrape & Index Albums**
-2. Click **Run workflow**
-3. Wait ~2 minutes for it to complete
-4. Reload your GitHub Pages URL — albums will appear!
-
-### Step 5 — Automatic updates
-
-The workflow runs automatically every 6 hours. No action needed.  
-You can also manually trigger it anytime from the Actions tab.
+### 4. Run the scraper
+Actions → "Scrape & Index Albums" → Run workflow
 
 ---
 
-## ⚙️ Configuration
+## How discovery works
 
-| Env Variable | Default | Description |
+```
+bunkr-albums.io  (paginated HTML directory)
+       ↓ album IDs + card metadata
+   albums_by_id dict
+       ↓ albums missing details
+   bunkr.si/a/{id}?advanced=1  (enrichment)
+       ↓ title, file_count, thumbnail, date, size
+   albums.json  →  GitHub Pages frontend
+```
+
+The scraper:
+- Extracts album cards from bunkr-albums.io (title, thumbnail, file count all in card HTML)
+- For albums with missing data, enriches via Bunkr's actual album page using gallery-dl's proven parsing approach (`window.albumFiles`, `og:title`, `og:image`)
+- Rotates across 14 Bunkr domains to handle CF challenges
+- Deduplicates across runs
+
+---
+
+## Tuning
+
+| Variable | Default | Notes |
 |---|---|---|
-| `MAX_ALBUMS` | `500` | Max new albums to index per run |
-| `REQUEST_DELAY` | `1.5` | Seconds between HTTP requests |
+| `MAX_ALBUMS` | 300 | New albums per run |
+| `REQUEST_DELAY` | 1.5 | Seconds between requests |
 
-Set these in the workflow dispatch inputs or repo **Settings → Secrets and variables → Actions → Variables**.
-
----
-
-## 🔍 Features
-
-### Frontend
-- ⚡ Instant client-side search (Lunr.js full-text with fuzzy matching)
-- 🎨 Dark mode only — premium design with animated cards
-- 📱 Responsive grid (works on mobile)
-- ∞ Infinite scroll — loads 60 cards at a time
-- 🔢 Filter by file count range (1–9, 10–49, 50–199, 200+)
-- 🖼 Filter by thumbnail presence
-- ↕️ Sort by date, file count, or title
-- ⌨️ Press `/` to focus the search bar instantly
-- 📡 RSS feed (`/feed.xml`) for latest 50 albums
-
-### Scraper
-- Tries the unofficial Bunkr API first, falls back to HTML scraping
-- Deduplicates across runs — never re-indexes known albums
-- Enriches albums without thumbnails via detail page scraping
-- Graceful retry on network errors (3 attempts with backoff)
-- Stores only metadata — **zero file downloads**
-
----
-
-## 📊 How the Index Grows
-
-| Run | New Albums Added |
-|-----|----------------|
-| First | Up to 500 |
-| Each subsequent | New albums since last run |
-| After 1 week | 500–3,500+ total |
-
-The scraper is conservative with rate limiting (1.5s between requests) to avoid bans.
-
----
-
-## 🛠 Enhancements You Can Add
-
-### Tag / category filtering
-Parse album titles to auto-detect categories and add filter pills.
-
-### Better discovery
-Seed with known album IDs from external lists, then let the scraper expand from there.
-
-### Sitemap
-Add a `generate_sitemap.py` that creates `sitemap.xml` for Google indexing.
-
-### Dark/light mode toggle
-Add a CSS `[data-theme=light]` override and a toggle button.
-
-### Album detail pages
-Generate static `a/ALBUM_ID.html` pages for each album (better SEO).
-
----
-
-## 📜 Legal
-
-This project indexes **only publicly available metadata** (titles, file counts, thumbnail URLs that are already publicly visible). No files are downloaded. This is equivalent to a search engine index.
-
----
-
-## 🤝 Contributing
-
-PRs welcome! Key areas to improve:
-- Better Bunkr API reverse engineering
-- Additional scraping fallbacks
-- SEO improvements (structured data, sitemaps)
+Set in workflow dispatch input or repo Variables.
