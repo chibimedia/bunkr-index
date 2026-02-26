@@ -1,94 +1,129 @@
-# MediaIndex v5 — Root Cause Fixed
+# MediaIndex — Multi-source scraper
 
-## Why every previous version produced 0 albums
+Indexes albums/videos from Fapello, Kemono.su, Eporner, Erome, Cyberdrop, and Bunkr into a unified `albums.json` with a React frontend.
 
-### The real problem: GitHub Actions IPs are datacenter IPs
+---
 
-GitHub Actions runners (`ubuntu-latest`) have well-known AWS/Azure datacenter
-IP ranges. **Cloudflare blocks these IPs** with a JS-challenge page on both
-`fapello.com` AND `bunkr-albums.io`.
+## Architecture
 
-The scraper received a ~2KB "checking your browser..." page every time.
-The length check caught it and returned `None`. Parser gets `None`, finds
-0 models, saves `albums.json` with 0 entries, commits it. Repeat forever.
+```
+scraper.py          ← orchestrator (runs all sources, saves index)
+fetcher.py          ← tiered HTTP: requests → cloudscraper → playwright
+index.py            ← schema, dedup, merge, commit guard
+scrapers/
+  fapello.py        ← cloudscraper default (CI-safe CF bypass)
+  kemono.py         ← API (plain requests, no Cloudflare)
+  eporner.py        ← API (plain requests, no Cloudflare)
+  erome.py          ← plain requests + cloudscraper fallback
+  cyberdrop.py      ← plain requests + mirror rotation + cloudscraper
+  bunkr.py          ← playwright required (CF Bot Management)
+tests.py            ← 52 unit tests, all parsers
+samples/            ← HTML/JSON fixtures used by tests
+debug/              ← saved CF block pages (uploaded as CI artifacts)
+```
 
-**This is why `ENABLE_BUNKR=false` also produced 0 — Fapello was equally
-blocked, just silently.**
+### Source reliability ranking
 
-### Secondary bug: Fapello photo/video count extraction
+| Source     | Method               | Works from CI? | Notes |
+|------------|----------------------|----------------|-------|
+| Eporner    | Official JSON API    | ✅ Always       | No auth, no CF |
+| Kemono     | Official JSON API    | ✅ Always       | No auth, no CF |
+| Fapello    | cloudscraper         | ✅ Usually      | CF IUAM bypass |
+| Erome      | requests/cloudscraper| ✅ Usually      | CF sometimes |
+| Cyberdrop  | requests + mirrors   | ⚠️ Varies       | 403 → mirror rotation |
+| Bunkr      | playwright           | ⚠️ Needs setup  | CF Bot Management |
 
-The v4 parser had this structure:
+---
 
+## Deploy to your repo
+
+Replace all files, then:
+
+```bash
+# First run — test APIs only (fast, reliable)
+ENABLE_BUNKR=false ENABLE_FAPELLO=false python scraper.py
+
+# Add Fapello once APIs are confirmed working
+ENABLE_BUNKR=false python scraper.py
+
+# Full run with Bunkr (needs playwright installed)
+python scraper.py
+```
+
+### Required env vars (GitHub Actions secrets/vars)
+
+| Variable         | Default  | Description |
+|------------------|----------|-------------|
+| `MAX_ALBUMS`     | `500`    | Max new records per run |
+| `ENABLE_BUNKR`   | `false`  | Enable Bunkr (playwright required) |
+| `ENABLE_FAPELLO` | `true`   | Enable Fapello scraper |
+| `ENABLE_KEMONO`  | `true`   | Enable Kemono API |
+| `ENABLE_EPORNER` | `true`   | Enable Eporner API |
+| `ENABLE_EROME`   | `true`   | Enable Erome scraper |
+| `DELAY_MIN`      | `2.0`    | Min seconds between requests |
+| `DELAY_MAX`      | `4.5`    | Max seconds between requests |
+| `DEBUG_NO_CACHE` | `false`  | Bypass cache (for debugging) |
+| `FORCE_COMMIT`   | `false`  | Skip commit guard |
+
+---
+
+## Why previous versions produced 0 albums
+
+GitHub Actions runners have AWS/Azure datacenter IPs. Cloudflare blocks them with a JS-challenge page (~2KB "checking your browser…"). The scraper received this page, the length check triggered, parser got nothing, saved 0 albums.
+
+**Fix:** `cloudscraper` for Fapello/Erome runs the CF JavaScript in Python (via js2py/Node.js), gets the `cf_clearance` cookie, retries with it. Works from CI IPs.
+
+Additionally, the v4 Fapello parser had a `for...else` bug:
 ```python
-for _ in range(4):
-    if photos or videos:
-        break      # ← no break statement was here
-    parent = parent.parent
+for parent in ...:
+    ...
 else:
-    photos, videos = 0, 0  # ← this ALWAYS fired (for/else fires when no break)
+    photos, videos = 0, 0  # fires when loop completes WITHOUT break
 ```
-
-Even when photo/video counts were found, the `else` clause reset them to 0.
+Since there was never a `break`, the `else` always fired, zeroing all counts.
 
 ---
 
-## How v5 fixes it
+## Debugging zero results
 
-### Fapello: `cloudscraper` replaces `requests`
+After a run, download the **scraper-debug artifact** from GitHub Actions.
 
-`cloudscraper` solves Cloudflare's JS-challenge automatically:
-1. Makes the initial request, receives the CF challenge page
-2. Runs the CF JavaScript in a Python JS interpreter (js2py or Node.js)
-3. Gets the `cf_clearance` cookie
-4. Retries the real request with that cookie
-5. Returns the actual page content
+- `debug/fapello/*.html` — pages that looked like CF blocks
+- `debug/kemono/*.html` — API error responses  
+- `validation.json` — counts per source
 
-This works from CI/datacenter IPs for standard CF "IUAM" (I'm Under Attack Mode).
+If `debug/fapello/new_p1.html` contains "Checking your browser" → cloudscraper isn't solving the challenge. Add Node.js to the workflow (cloudscraper uses Node for harder challenges).
 
-### Bunkr: `nodriver` replaces `patchright`
+If `debug/fapello/new_p1.html` is empty → network timeout. Check if fapello.com is up.
 
-`nodriver` is the async successor to `undetected-chromedriver`. It uses a
-custom CDP implementation (not standard WebDriver) which avoids the automation
-signals that Cloudflare's Bot Management looks for. Runs headless on CI with
-Xvfb for display emulation.
+If `debug/fapello/new_p1.html` is real HTML but 0 models → selectors changed. Open the file in a browser and inspect the actual CSS classes, compare to `scrapers/fapello.py`.
 
 ---
 
-## Deploy steps
+## Commit guard
 
-1. **Replace all files** in your repo with v5 files
-2. **Verify** `.github/workflows/scrape.yml` is in the correct folder (not root)
-3. **Run workflow**: Actions → Scrape & Index Albums → Run workflow
-   - For first run: set `enable_bunkr` = **false** to test Fapello only
-   - Takes ~3–5 min for Fapello, ~15 min with Bunkr enabled
+`albums.json` is only committed when:
+- `meta.total > 0` (non-empty index)
+- `meta.placeholder_count / meta.total < 0.05` (< 5% "Welcome!" titles)
 
-## If it still produces 0 albums
+Override with `FORCE_COMMIT=true` (for manual debugging runs).
 
-After the run, go to: **Actions → your run → Artifacts → scraper-debug-N**
+---
 
-Download that zip. Inside `debug/` you'll find HTML files of every page that
-looked like a CF block. Open them in a browser to see exactly what the CI
-runner received. This tells you:
+## Running tests
 
-- **"Checking your browser"** = cloudscraper didn't solve the challenge
-  → Try adding `nodejs` installation to the workflow (cloudscraper uses Node.js
-    for better JS challenge solving)
-- **Empty file / 0 bytes** = network timeout or DNS failure
-  → Check if the site is even up
-- **Normal HTML but 0 models parsed** = selectors need updating
-  → The site changed its HTML structure; open the debug HTML in a browser
-    and inspect the actual CSS classes
-
-## Adding Node.js to improve cloudscraper (optional but recommended)
-
-Add this step to the workflow before "Run scraper":
-
-```yaml
-- name: Install Node.js (improves cloudscraper JS solving)
-  uses: actions/setup-node@v4
-  with:
-    node-version: '20'
+```bash
+pip install requests cloudscraper brotlicffi beautifulsoup4 lxml
+python tests.py
+# → 52 passed, 0 failed
 ```
 
-cloudscraper automatically uses Node.js when available, which handles
-newer CF challenges better than the pure-Python js2py interpreter.
+---
+
+## Adding a new source
+
+1. Create `scrapers/newsite.py` with a `scrape() -> list[dict]` function
+2. Each record must have: `id`, `title`, `source`, `url`, `thumbnail`, `file_count`, `has_videos`, `indexed_at`
+3. Add 5 sample HTML files to `samples/newsite/`
+4. Add unit tests to `tests.py`
+5. Call `run_source("newsite", ..., lambda: newsite.scrape(...), ...)` in `scraper.py`

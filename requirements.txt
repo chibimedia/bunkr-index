@@ -1,11 +1,12 @@
-# ── Fapello (Cloudflare JS-challenge bypass without a full browser) ──────────
-cloudscraper>=1.2.71    # handles CF IUAM/JS-challenge from datacenter IPs
-requests>=2.32.0        # cloudscraper depends on this
-brotlicffi>=1.0.0       # decode brotli-encoded CF responses correctly
+# ── Fetching ──────────────────────────────────────────────────────────────────
+requests>=2.32.0           # baseline HTTP
+cloudscraper>=1.2.71       # Cloudflare JS-challenge bypass (Fapello, Erome from CI)
+brotlicffi>=1.0.0          # brotli response decoding (prevents garbled CF responses)
 
-# ── HTML parsing ─────────────────────────────────────────────────────────────
+# ── Parsing ───────────────────────────────────────────────────────────────────
 beautifulsoup4>=4.12.0
 lxml>=5.1.0
 
-# ── Bunkr (full undetected browser required for CF Bot Management) ────────────
-nodriver>=0.36          # async undetected Chrome, successor to undetected-chromedriver
+# ── Optional: playwright (Bunkr, Erome hard fallback) ─────────────────────────
+# Install separately:  playwright install chromium --with-deps
+# playwright>=1.40.0
