@@ -1,11 +1,11 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom">
   <channel>
-    <title>BunkrIndex — Latest Albums</title>
+    <title>MediaIndex — Latest</title>
     <link>https://chibimedia.github.io/bunkr-index</link>
-    <description>Searchable index of public Bunkr albums</description>
+    <description>Searchable index of Fapello &amp; Bunkr albums</description>
     <language>en-us</language>
-    <lastBuildDate>2026-02-26T02:54:45.77347 +0000</lastBuildDate>
+    <lastBuildDate>2026-02-26T03:50:38.00071 +0000</lastBuildDate>
     <atom:link href="https://chibimedia.github.io/bunkr-index/feed.xml" rel="self" type="application/rss+xml"/>
 
   </channel>
