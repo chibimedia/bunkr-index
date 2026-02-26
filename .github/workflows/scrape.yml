@@ -5,7 +5,7 @@ on:
     - cron: "0 */6 * * *"
   workflow_dispatch:
     inputs:
-      max_per_source:
+      max_models:
         description: "Max records per source (default 1000)"
         default: "1000"
         required: false
@@ -39,11 +39,11 @@ jobs:
           cache: "pip"
 
       - name: Install dependencies
-        run: pip install requests
+        run: pip install requests beautifulsoup4 lxml
 
       - name: Run scraper
         env:
-          MAX_PER_SOURCE: ${{ github.event.inputs.max_per_source || '1000' }}
+          MAX_MODELS: ${{ github.event.inputs.max_models || '1000' }}
           ENABLE_KEMONO:  "true"
           ENABLE_COOMER:  ${{ github.event.inputs.enable_coomer || 'true' }}
           ENABLE_EPORNER: "true"
