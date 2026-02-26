@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       max_albums:
-        description: "Max new albums to index per run (default 300)"
+        description: "Max new albums per run"
         required: false
         default: "300"
 
@@ -16,32 +16,45 @@ permissions:
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
 
     steps:
-      - name: Checkout repo
+      - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
 
+      # ── Python setup ────────────────────────────────────────────────────────
       - name: Set up Python 3.12
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: "pip"
 
-      - name: Install dependencies
+      - name: Install Python dependencies
         run: pip install -r requirements.txt
 
+      # ── Install Chromium for patchright ─────────────────────────────────────
+      # patchright uses its own patched Chromium build
+      - name: Install patchright browser
+        run: patchright install chromium --with-deps
+
+      # ── Run scraper ──────────────────────────────────────────────────────────
       - name: Run scraper
         env:
           MAX_ALBUMS: ${{ github.event.inputs.max_albums || '300' }}
-          REQUEST_DELAY: "1.5"
+          REQUEST_DELAY: "3.0"
+          # Headless must be true on CI (no display server)
+          HEADLESS: "true"
+          # Tell patchright not to look for a display
+          DISPLAY: ""
         run: python scraper.py
 
+      # ── Generate RSS ─────────────────────────────────────────────────────────
       - name: Generate RSS feed
         run: python generate_rss.py
 
+      # ── Commit results ───────────────────────────────────────────────────────
       - name: Commit results
         run: |
           git config user.name  "github-actions[bot]"
