@@ -252,13 +252,13 @@ def main():
                 new_count += 1
 
     if ENABLE_KEMONO:
-        for rec in scrape_kemono_creators("https://kemono.su", "kemono", MAX_MODELS):
+        for rec in scrape_kemono_creators("https://api.kemono.party", "kemono", max_models):
             if rec["id"] not in albums:
                 albums[rec["id"]] = rec
                 new_count += 1
 
     if ENABLE_COOMER:
-        for rec in scrape_kemono_creators("https://coomer.su", "coomer", MAX_MODELS):
+        for rec in scrape_kemono_creators("https://api.coomer.party", "coomer", max_models):
             if rec["id"] not in albums:
                 albums[rec["id"]] = rec
                 new_count += 1
