@@ -1,0 +1,723 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>BunkrIndex — Album Discovery</title>
+  <meta name="description" content="The fastest, most complete searchable index of Bunkr albums. Browse, filter, and discover albums instantly." />
+  <meta property="og:title" content="BunkrIndex — Album Discovery" />
+  <meta property="og:description" content="Search thousands of indexed Bunkr albums instantly." />
+  <meta name="theme-color" content="#0a0a0f" />
+
+  <!-- Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet" />
+
+  <!-- Lunr.js for full-text search -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/lunr.js/2.3.9/lunr.min.js" crossorigin="anonymous"></script>
+
+  <style>
+    /* ── Design system ───────────────────────────────────────── */
+    :root {
+      --bg:        #0a0a0f;
+      --surface:   #13131a;
+      --surface2:  #1c1c28;
+      --border:    #252535;
+      --accent:    #5b4fff;
+      --accent2:   #ff4f8b;
+      --text:      #e8e8f0;
+      --muted:     #6b6b85;
+      --card-hover:#1e1e2e;
+      --radius:    12px;
+      --glow:      0 0 40px rgba(91,79,255,.18);
+      font-size: 15px;
+    }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'Syne', sans-serif;
+      min-height: 100vh;
+      overflow-x: hidden;
+    }
+
+    /* ── Noise overlay ──────────────────────────────────────── */
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)' opacity='0.04'/%3E%3C/svg%3E");
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    /* ── Header ─────────────────────────────────────────────── */
+    header {
+      position: relative;
+      padding: 3rem 2rem 0;
+      text-align: center;
+      z-index: 1;
+    }
+
+    .logo {
+      font-size: clamp(2.2rem, 6vw, 4rem);
+      font-weight: 800;
+      letter-spacing: -0.03em;
+      background: linear-gradient(135deg, #fff 0%, var(--accent) 50%, var(--accent2) 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+      line-height: 1;
+      margin-bottom: .5rem;
+    }
+
+    .tagline {
+      color: var(--muted);
+      font-size: .9rem;
+      letter-spacing: .1em;
+      text-transform: uppercase;
+      margin-bottom: 2.5rem;
+    }
+
+    /* ── Glow orbs ──────────────────────────────────────────── */
+    .orb {
+      position: fixed;
+      border-radius: 50%;
+      filter: blur(120px);
+      pointer-events: none;
+      z-index: 0;
+      opacity: .35;
+    }
+    .orb-1 { width: 500px; height: 500px; background: var(--accent); top: -200px; left: -150px; }
+    .orb-2 { width: 400px; height: 400px; background: var(--accent2); bottom: -150px; right: -100px; }
+
+    /* ── Stats bar ───────────────────────────────────────────── */
+    #stats-bar {
+      display: flex;
+      justify-content: center;
+      gap: 2rem;
+      margin: 0 auto 2rem;
+      font-family: 'DM Mono', monospace;
+      font-size: .8rem;
+      color: var(--muted);
+    }
+    #stats-bar span strong {
+      color: var(--text);
+      font-weight: 500;
+    }
+
+    /* ── Search & Filters ────────────────────────────────────── */
+    .controls {
+      position: sticky;
+      top: 0;
+      z-index: 100;
+      background: linear-gradient(to bottom, rgba(10,10,15,.98) 80%, transparent);
+      padding: 1.2rem 2rem 1.5rem;
+      backdrop-filter: blur(12px);
+    }
+
+    .search-wrap {
+      position: relative;
+      max-width: 680px;
+      margin: 0 auto .9rem;
+    }
+
+    .search-icon {
+      position: absolute;
+      left: 1.1rem;
+      top: 50%;
+      transform: translateY(-50%);
+      color: var(--muted);
+      pointer-events: none;
+    }
+
+    #search {
+      width: 100%;
+      padding: .85rem 1.1rem .85rem 3rem;
+      background: var(--surface);
+      border: 1.5px solid var(--border);
+      border-radius: var(--radius);
+      color: var(--text);
+      font-family: 'Syne', sans-serif;
+      font-size: 1rem;
+      outline: none;
+      transition: border-color .2s, box-shadow .2s;
+    }
+    #search::placeholder { color: var(--muted); }
+    #search:focus {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(91,79,255,.18);
+    }
+
+    .filter-row {
+      display: flex;
+      gap: .6rem;
+      justify-content: center;
+      flex-wrap: wrap;
+      max-width: 680px;
+      margin: 0 auto;
+    }
+
+    select, .filter-btn {
+      padding: .42rem .85rem;
+      background: var(--surface);
+      border: 1.5px solid var(--border);
+      border-radius: 999px;
+      color: var(--text);
+      font-family: 'Syne', sans-serif;
+      font-size: .8rem;
+      cursor: pointer;
+      outline: none;
+      transition: border-color .2s, background .2s;
+      -webkit-appearance: none;
+    }
+    select:hover, .filter-btn:hover {
+      border-color: var(--accent);
+      background: var(--surface2);
+    }
+    .filter-btn.active {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: #fff;
+    }
+
+    #result-count {
+      text-align: center;
+      font-family: 'DM Mono', monospace;
+      font-size: .75rem;
+      color: var(--muted);
+      margin-top: .5rem;
+    }
+
+    /* ── Grid ────────────────────────────────────────────────── */
+    main {
+      position: relative;
+      z-index: 1;
+      padding: 0 1.5rem 4rem;
+      max-width: 1600px;
+      margin: 0 auto;
+    }
+
+    #grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+      gap: 1.1rem;
+    }
+
+    /* ── Card ────────────────────────────────────────────────── */
+    .card {
+      background: var(--surface);
+      border: 1.5px solid var(--border);
+      border-radius: var(--radius);
+      overflow: hidden;
+      transition: transform .22s cubic-bezier(.22,1,.36,1), box-shadow .22s, border-color .22s;
+      text-decoration: none;
+      color: var(--text);
+      display: flex;
+      flex-direction: column;
+      animation: fadeUp .4s cubic-bezier(.22,1,.36,1) backwards;
+    }
+    .card:hover {
+      transform: translateY(-4px);
+      border-color: var(--accent);
+      box-shadow: var(--glow);
+      background: var(--card-hover);
+    }
+
+    @keyframes fadeUp {
+      from { opacity: 0; transform: translateY(18px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+
+    .card-thumb {
+      aspect-ratio: 16/10;
+      background: var(--surface2);
+      overflow: hidden;
+      position: relative;
+    }
+    .card-thumb img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+      transition: transform .3s;
+    }
+    .card:hover .card-thumb img { transform: scale(1.06); }
+
+    .thumb-placeholder {
+      width: 100%;
+      height: 100%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 2rem;
+      color: var(--border);
+      background: linear-gradient(135deg, var(--surface2) 0%, var(--surface) 100%);
+    }
+
+    .card-badge {
+      position: absolute;
+      bottom: .5rem;
+      right: .5rem;
+      background: rgba(0,0,0,.7);
+      color: #fff;
+      font-family: 'DM Mono', monospace;
+      font-size: .7rem;
+      padding: .2rem .5rem;
+      border-radius: 999px;
+      backdrop-filter: blur(4px);
+    }
+
+    .card-body {
+      padding: .75rem .85rem .85rem;
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      gap: .3rem;
+    }
+
+    .card-title {
+      font-size: .88rem;
+      font-weight: 600;
+      line-height: 1.35;
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+    }
+
+    .card-meta {
+      font-family: 'DM Mono', monospace;
+      font-size: .72rem;
+      color: var(--muted);
+      margin-top: auto;
+    }
+
+    /* ── Empty / Loading state ───────────────────────────────── */
+    #empty {
+      display: none;
+      text-align: center;
+      padding: 5rem 2rem;
+      color: var(--muted);
+    }
+    #empty .empty-icon { font-size: 3rem; margin-bottom: 1rem; }
+
+    #loader {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 6rem 2rem;
+      gap: .7rem;
+      color: var(--muted);
+      font-family: 'DM Mono', monospace;
+      font-size: .85rem;
+    }
+    .spinner {
+      width: 20px; height: 20px;
+      border: 2px solid var(--border);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin .8s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* ── Footer ─────────────────────────────────────────────── */
+    footer {
+      position: relative;
+      z-index: 1;
+      text-align: center;
+      padding: 2rem;
+      font-family: 'DM Mono', monospace;
+      font-size: .75rem;
+      color: var(--muted);
+      border-top: 1px solid var(--border);
+    }
+    footer a { color: var(--accent); text-decoration: none; }
+    footer a:hover { text-decoration: underline; }
+
+    /* ── RSS link ────────────────────────────────────────────── */
+    .rss-link {
+      display: inline-flex;
+      align-items: center;
+      gap: .3rem;
+      color: var(--muted);
+      font-size: .75rem;
+      font-family: 'DM Mono', monospace;
+      text-decoration: none;
+      margin-left: 1rem;
+      transition: color .2s;
+    }
+    .rss-link:hover { color: #ff6600; }
+
+    /* ── Scroll to top ───────────────────────────────────────── */
+    #scroll-top {
+      position: fixed;
+      bottom: 2rem;
+      right: 2rem;
+      width: 40px;
+      height: 40px;
+      background: var(--accent);
+      border: none;
+      border-radius: 50%;
+      color: #fff;
+      font-size: 1.1rem;
+      cursor: pointer;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      z-index: 200;
+      transition: opacity .2s, transform .2s;
+      box-shadow: 0 4px 20px rgba(91,79,255,.4);
+    }
+    #scroll-top:hover { transform: translateY(-2px); }
+
+    /* ── Responsive ──────────────────────────────────────────── */
+    @media (max-width: 600px) {
+      header { padding: 2rem 1rem 0; }
+      .controls { padding: 1rem 1rem 1.2rem; }
+      #grid { grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: .7rem; }
+      main { padding: 0 1rem 3rem; }
+    }
+  </style>
+</head>
+<body>
+
+  <div class="orb orb-1"></div>
+  <div class="orb orb-2"></div>
+
+  <header>
+    <div class="logo">BunkrIndex</div>
+    <p class="tagline">The complete, searchable album directory</p>
+    <div id="stats-bar">
+      <span><strong id="stat-total">—</strong> albums indexed</span>
+      <span>Updated <strong id="stat-updated">—</strong></span>
+    </div>
+  </header>
+
+  <div class="controls">
+    <div class="search-wrap">
+      <svg class="search-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
+      </svg>
+      <input id="search" type="search" placeholder="Search albums by title…" autocomplete="off" spellcheck="false" />
+    </div>
+
+    <div class="filter-row">
+      <select id="sort">
+        <option value="date-desc">Newest first</option>
+        <option value="date-asc">Oldest first</option>
+        <option value="files-desc">Most files</option>
+        <option value="files-asc">Fewest files</option>
+        <option value="title-asc">A → Z</option>
+        <option value="title-desc">Z → A</option>
+      </select>
+
+      <select id="filter-count">
+        <option value="all">Any file count</option>
+        <option value="1-9">1–9 files</option>
+        <option value="10-49">10–49 files</option>
+        <option value="50-199">50–199 files</option>
+        <option value="200+">200+ files</option>
+      </select>
+
+      <button class="filter-btn active" data-thumb="all">All</button>
+      <button class="filter-btn" data-thumb="thumb">Has thumbnail</button>
+      <button class="filter-btn" data-thumb="no-thumb">No thumbnail</button>
+    </div>
+
+    <div id="result-count"></div>
+  </div>
+
+  <main>
+    <div id="loader">
+      <div class="spinner"></div>
+      Loading index…
+    </div>
+    <div id="grid" style="display:none"></div>
+    <div id="empty">
+      <div class="empty-icon">🔍</div>
+      <p>No albums match your search.</p>
+      <p style="margin-top:.5rem;font-size:.8rem">Try different keywords or reset the filters.</p>
+    </div>
+  </main>
+
+  <footer>
+    Community-built index. Not affiliated with Bunkr.
+    <a href="feed.xml" class="rss-link" title="RSS Feed">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M6.18 15.64a2.18 2.18 0 0 1 2.18 2.18C8.36 19.01 7.38 20 6.18 20C4.98 20 4 19.01 4 17.82a2.18 2.18 0 0 1 2.18-2.18M4 4.44A15.56 15.56 0 0 1 19.56 20h-2.83A12.73 12.73 0 0 0 4 7.27V4.44m0 5.66a9.9 9.9 0 0 1 9.9 9.9h-2.83A7.07 7.07 0 0 0 4 12.93V10.1z"/></svg>
+      RSS
+    </a>
+  </footer>
+
+  <button id="scroll-top" title="Back to top" aria-label="Scroll to top">↑</button>
+
+  <script>
+  (() => {
+    'use strict';
+
+    // ── State ─────────────────────────────────────────────────
+    let allAlbums = [];
+    let lunrIndex = null;
+    let filtered = [];
+    const PAGE_SIZE = 60;
+    let rendered = 0;
+    let rendering = false;
+
+    // ── DOM refs ──────────────────────────────────────────────
+    const grid        = document.getElementById('grid');
+    const loader      = document.getElementById('loader');
+    const emptyEl     = document.getElementById('empty');
+    const searchInput = document.getElementById('search');
+    const sortSel     = document.getElementById('sort');
+    const countSel    = document.getElementById('filter-count');
+    const thumbBtns   = document.querySelectorAll('[data-thumb]');
+    const resultCount = document.getElementById('result-count');
+    const statTotal   = document.getElementById('stat-total');
+    const statUpdated = document.getElementById('stat-updated');
+    const scrollTopBtn= document.getElementById('scroll-top');
+
+    // ── Load data ─────────────────────────────────────────────
+    async function loadData() {
+      try {
+        const r = await fetch('albums.json?v=' + Date.now());
+        const data = await r.json();
+        allAlbums = data.albums || [];
+
+        // Stats
+        statTotal.textContent = allAlbums.length.toLocaleString();
+        const updated = data.meta?.last_updated;
+        if (updated) {
+          const d = new Date(updated);
+          statUpdated.textContent = d.toLocaleDateString('en-US', {
+            month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'
+          });
+        }
+
+        buildIndex();
+        applyFilters();
+      } catch (err) {
+        loader.innerHTML = '<p style="color:#ff4f8b">Failed to load index. Please try refreshing.</p>';
+        console.error(err);
+      }
+    }
+
+    // ── Lunr index ────────────────────────────────────────────
+    function buildIndex() {
+      lunrIndex = lunr(function () {
+        this.ref('id');
+        this.field('title', { boost: 10 });
+        this.metadataWhitelist = ['position'];
+        allAlbums.forEach(a => this.add({ id: a.id, title: a.title || '' }));
+      });
+    }
+
+    // ── Filtering ─────────────────────────────────────────────
+    function getThumbFilter() {
+      const active = document.querySelector('[data-thumb].active');
+      return active ? active.dataset.thumb : 'all';
+    }
+
+    function parseCountRange(val) {
+      if (val === 'all') return null;
+      if (val === '200+') return [200, Infinity];
+      const [lo, hi] = val.split('-').map(Number);
+      return [lo, hi];
+    }
+
+    function applyFilters() {
+      const query   = searchInput.value.trim();
+      const sort    = sortSel.value;
+      const countR  = parseCountRange(countSel.value);
+      const thumbF  = getThumbFilter();
+
+      let results = allAlbums;
+
+      // Search
+      if (query.length >= 2 && lunrIndex) {
+        try {
+          const hits = lunrIndex.search(query + '~1');
+          const hitIds = new Set(hits.map(h => h.ref));
+          results = allAlbums.filter(a => hitIds.has(a.id));
+        } catch (_) {
+          // partial query fallback
+          const q = query.toLowerCase();
+          results = allAlbums.filter(a => (a.title || '').toLowerCase().includes(q));
+        }
+      }
+
+      // File count filter
+      if (countR) {
+        results = results.filter(a => {
+          const fc = a.file_count || 0;
+          return fc >= countR[0] && fc <= countR[1];
+        });
+      }
+
+      // Thumbnail filter
+      if (thumbF === 'thumb') {
+        results = results.filter(a => a.thumbnail);
+      } else if (thumbF === 'no-thumb') {
+        results = results.filter(a => !a.thumbnail);
+      }
+
+      // Sort
+      results = [...results].sort((a, b) => {
+        switch (sort) {
+          case 'date-desc': return cmpDate(b, a);
+          case 'date-asc':  return cmpDate(a, b);
+          case 'files-desc': return (b.file_count || 0) - (a.file_count || 0);
+          case 'files-asc':  return (a.file_count || 0) - (b.file_count || 0);
+          case 'title-asc':  return (a.title || '').localeCompare(b.title || '');
+          case 'title-desc': return (b.title || '').localeCompare(a.title || '');
+          default: return 0;
+        }
+      });
+
+      filtered = results;
+      rendered = 0;
+      grid.innerHTML = '';
+      grid.style.display = 'grid';
+      loader.style.display = 'none';
+
+      if (filtered.length === 0) {
+        emptyEl.style.display = 'block';
+        resultCount.textContent = '';
+      } else {
+        emptyEl.style.display = 'none';
+        resultCount.textContent = `Showing ${Math.min(PAGE_SIZE, filtered.length).toLocaleString()} of ${filtered.length.toLocaleString()} albums`;
+        renderBatch();
+      }
+    }
+
+    function cmpDate(a, b) {
+      const da = new Date(a.date || a.indexed_at || 0).getTime();
+      const db = new Date(b.date || b.indexed_at || 0).getTime();
+      return da - db;
+    }
+
+    // ── Rendering ─────────────────────────────────────────────
+    function renderBatch() {
+      if (rendering) return;
+      rendering = true;
+
+      const batch = filtered.slice(rendered, rendered + PAGE_SIZE);
+      batch.forEach((album, i) => {
+        const card = makeCard(album, rendered + i);
+        grid.appendChild(card);
+      });
+      rendered += batch.length;
+      rendering = false;
+
+      if (rendered < filtered.length) {
+        resultCount.textContent = `Showing ${rendered.toLocaleString()} of ${filtered.length.toLocaleString()} albums — scroll for more`;
+      } else {
+        resultCount.textContent = `${filtered.length.toLocaleString()} albums`;
+      }
+    }
+
+    function makeCard(album, index) {
+      const a = document.createElement('a');
+      a.className = 'card';
+      a.href = album.url || '#';
+      a.target = '_blank';
+      a.rel = 'noopener noreferrer';
+      a.style.animationDelay = Math.min(index % PAGE_SIZE, 30) * 20 + 'ms';
+
+      const thumb = album.thumbnail ? `
+        <img
+          src="${escHtml(album.thumbnail)}"
+          alt="${escHtml(album.title)}"
+          loading="lazy"
+          decoding="async"
+          onerror="this.parentElement.innerHTML='<div class=thumb-placeholder>📁</div>'"
+        />` : `<div class="thumb-placeholder">📁</div>`;
+
+      const fileLabel = album.file_count
+        ? `<span class="card-badge">${album.file_count} files</span>`
+        : '';
+
+      const dateStr = album.date
+        ? new Date(album.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+        : (album.indexed_at
+            ? 'Indexed ' + new Date(album.indexed_at).toLocaleDateString('en-US', { month: 'short', year: 'numeric' })
+            : '');
+
+      a.innerHTML = `
+        <div class="card-thumb">
+          ${thumb}
+          ${fileLabel}
+        </div>
+        <div class="card-body">
+          <div class="card-title">${escHtml(album.title || album.id)}</div>
+          <div class="card-meta">${escHtml(dateStr)}</div>
+        </div>
+      `;
+      return a;
+    }
+
+    function escHtml(str) {
+      if (!str) return '';
+      return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+    }
+
+    // ── Infinite scroll ───────────────────────────────────────
+    const io = new IntersectionObserver(entries => {
+      if (entries[0].isIntersecting && rendered < filtered.length) {
+        renderBatch();
+      }
+    }, { rootMargin: '400px' });
+
+    const sentinel = document.createElement('div');
+    sentinel.id = 'sentinel';
+    document.querySelector('footer').before(sentinel);
+    io.observe(sentinel);
+
+    // ── Events ────────────────────────────────────────────────
+    let debounceTimer;
+    function debounce(fn, ms) {
+      clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(fn, ms);
+    }
+
+    searchInput.addEventListener('input', () => debounce(applyFilters, 220));
+    sortSel.addEventListener('change', applyFilters);
+    countSel.addEventListener('change', applyFilters);
+
+    thumbBtns.forEach(btn => {
+      btn.addEventListener('click', () => {
+        thumbBtns.forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        applyFilters();
+      });
+    });
+
+    // Keyboard shortcut: / to focus search
+    document.addEventListener('keydown', e => {
+      if (e.key === '/' && document.activeElement !== searchInput) {
+        e.preventDefault();
+        searchInput.focus();
+      }
+    });
+
+    // Scroll-to-top button
+    window.addEventListener('scroll', () => {
+      scrollTopBtn.style.display = window.scrollY > 600 ? 'flex' : 'none';
+    });
+    scrollTopBtn.addEventListener('click', () => {
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    });
+
+    // ── Boot ──────────────────────────────────────────────────
+    loadData();
+
+  })();
+  </script>
+</body>
+</html>
