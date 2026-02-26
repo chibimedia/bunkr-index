@@ -1,12 +1,1 @@
-# ── Fetching ──────────────────────────────────────────────────────────────────
-requests>=2.32.0           # baseline HTTP
-cloudscraper>=1.2.71       # Cloudflare JS-challenge bypass (Fapello, Erome from CI)
-brotlicffi>=1.0.0          # brotli response decoding (prevents garbled CF responses)
-
-# ── Parsing ───────────────────────────────────────────────────────────────────
-beautifulsoup4>=4.12.0
-lxml>=5.1.0
-
-# ── Optional: playwright (Bunkr, Erome hard fallback) ─────────────────────────
-# Install separately:  playwright install chromium --with-deps
-# playwright>=1.40.0
+requests>=2.32.0
