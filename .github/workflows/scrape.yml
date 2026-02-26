@@ -6,9 +6,15 @@ on:
   workflow_dispatch:
     inputs:
       max_albums:
-        description: "Max new albums per run"
+        description: "Max new items to index per run"
         required: false
-        default: "300"
+        default: "500"
+      enable_bunkr:
+        description: "Enable Bunkr scraping (needs stealth browser)"
+        required: false
+        default: "true"
+        type: choice
+        options: ["true", "false"]
 
 permissions:
   contents: write
@@ -24,7 +30,6 @@ jobs:
         with:
           fetch-depth: 1
 
-      # ── Python setup ────────────────────────────────────────────────────────
       - name: Set up Python 3.12
         uses: actions/setup-python@v5
         with:
@@ -34,27 +39,23 @@ jobs:
       - name: Install Python dependencies
         run: pip install -r requirements.txt
 
-      # ── Install Chromium for patchright ─────────────────────────────────────
-      # patchright uses its own patched Chromium build
-      - name: Install patchright browser
+      # Only install browser if Bunkr scraping is enabled
+      - name: Install patchright Chromium (for Bunkr stealth scraping)
+        if: ${{ github.event.inputs.enable_bunkr != 'false' }}
         run: patchright install chromium --with-deps
 
-      # ── Run scraper ──────────────────────────────────────────────────────────
       - name: Run scraper
         env:
-          MAX_ALBUMS: ${{ github.event.inputs.max_albums || '300' }}
-          REQUEST_DELAY: "3.0"
-          # Headless must be true on CI (no display server)
-          HEADLESS: "true"
-          # Tell patchright not to look for a display
-          DISPLAY: ""
+          MAX_ALBUMS:    ${{ github.event.inputs.max_albums || '500' }}
+          ENABLE_BUNKR:  ${{ github.event.inputs.enable_bunkr || 'true' }}
+          HEADLESS:      "true"
+          DELAY_MIN:     "1.5"
+          DELAY_MAX:     "3.0"
         run: python scraper.py
 
-      # ── Generate RSS ─────────────────────────────────────────────────────────
       - name: Generate RSS feed
         run: python generate_rss.py
 
-      # ── Commit results ───────────────────────────────────────────────────────
       - name: Commit results
         run: |
           git config user.name  "github-actions[bot]"
