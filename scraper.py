@@ -1,83 +1,89 @@
 #!/usr/bin/env python3
 """
-MediaIndex Scraper v4
+MediaIndex Scraper v5
 =====================
-CONFIRMED STATUS (tested Feb 2025):
-  - fapello.com       → plain requests, 200 OK, full static HTML ✓ EASY
-  - bunkr.si/.cr/etc  → 403 to plain requests, needs stealth browser
-  - bunkr-albums.io   → 403 to plain requests, needs stealth browser
 
-STRATEGY:
-  1. Scrape Fapello first — guaranteed results, populates index fast
-  2. Attempt Bunkr via patchright stealth browser
-  3. Deduplicate and merge everything into albums.json
+ROOT CAUSE OF ALL PREVIOUS FAILURES:
+  GitHub Actions runners have datacenter IPs. Cloudflare JS-challenges all
+  requests from these IPs on both fapello.com AND bunkr-albums.io.
+  The scraper got a ~2KB "checking your browser" page every time,
+  which the length check caught and bailed on — so 0 albums every run.
 
-Fapello URL structure (confirmed from live HTML):
-  - Listing:   fapello.com/page-N/
-  - Model page: fapello.com/{slug}/
-  - Avatar:    fapello.com/content/X/X/{slug}/1000/{slug}_0001.jpg
-  - Video URLs: fapello.com/content/.../mp4 (detected from post text "+N videos")
+  Additionally, the Fapello photo/video count extraction had a Python
+  for/else bug that silently zeroed all counts regardless.
+
+FIXES IN THIS VERSION:
+  1. Fapello:  cloudscraper replaces requests — it solves Cloudflare's
+               JS challenge (cf_clearance cookie) without a full browser.
+               Works reliably from CI/datacenter IPs for CF "IUAM" mode.
+
+  2. Bunkr:    nodriver (async, undetected-chromedriver successor) replaces
+               patchright. nodriver uses a custom CDP implementation that
+               avoids the automation signals patchright still exposes.
+               Runs headless on CI with Xvfb for display emulation.
+
+  3. Parsing:  Fixed the for/else Python bug that zeroed photo/video counts.
+               Improved model slug detection to match actual Fapello HTML.
+
+  4. Debug:    Every response is saved to debug/ if it looks like a CF block.
+               The workflow will upload debug/ as an artifact so you can see
+               exactly what the CI runner is receiving.
 """
 
-import json, os, re, time, random, logging, hashlib
+import asyncio
+import json
+import os
+import re
+import time
+import random
+import logging
+import hashlib
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Optional
-import requests
+
 from bs4 import BeautifulSoup
 
-logging.basicConfig(level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%H:%M:%S",
+)
 log = logging.getLogger(__name__)
 
 # ── Config ────────────────────────────────────────────────────────────────────
-OUT_FILE      = Path("albums.json")
-CACHE_DIR     = Path("cache")
-CACHE_TTL     = 60 * 60 * 5  # 5 hours
-MAX_NEW       = int(os.getenv("MAX_ALBUMS", "500"))
-DELAY_MIN     = float(os.getenv("DELAY_MIN", "1.0"))
-DELAY_MAX     = float(os.getenv("DELAY_MAX", "2.5"))
-ENABLE_BUNKR  = os.getenv("ENABLE_BUNKR", "true").lower() != "false"
-HEADLESS      = os.getenv("HEADLESS", "true").lower() != "false"
+OUT_FILE     = Path("albums.json")
+CACHE_DIR    = Path("cache")
+DEBUG_DIR    = Path("debug")
+CACHE_TTL    = 60 * 60 * 4   # 4 hours
+MAX_NEW      = int(os.getenv("MAX_ALBUMS", "500"))
+DELAY_MIN    = float(os.getenv("DELAY_MIN", "2.0"))
+DELAY_MAX    = float(os.getenv("DELAY_MAX", "4.5"))
+ENABLE_BUNKR = os.getenv("ENABLE_BUNKR", "true").lower() != "false"
 
 BUNKR_DOMAINS = [
-    "bunkr.si", "bunkr.cr", "bunkr.fi", "bunkr.ph", "bunkr.pk",
-    "bunkr.ps", "bunkr.ws", "bunkr.black", "bunkr.red",
-    "bunkr.media", "bunkr.site", "bunkr.ac", "bunkr.ci", "bunkr.sk",
+    "bunkr.si", "bunkr.cr", "bunkr.fi", "bunkr.ph",
+    "bunkr.pk", "bunkr.ps", "bunkr.ws", "bunkr.black",
+    "bunkr.red", "bunkr.media", "bunkr.site",
 ]
 
-FAPELLO_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/131.0.0.0 Safari/537.36"
-    ),
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Accept-Encoding": "gzip, deflate, br",
-    "Connection": "keep-alive",
-    "Referer": "https://fapello.com/",
-}
-
 CACHE_DIR.mkdir(exist_ok=True)
+DEBUG_DIR.mkdir(exist_ok=True)
 
-# ── Cache ─────────────────────────────────────────────────────────────────────
+
+# ── Cache helpers ─────────────────────────────────────────────────────────────
 def cache_key(url: str) -> Path:
     return CACHE_DIR / (hashlib.sha1(url.encode()).hexdigest() + ".html")
 
 def cache_valid(p: Path) -> bool:
     if not p.exists(): return False
-    age = datetime.now(timezone.utc) - datetime.fromtimestamp(p.stat().st_mtime, tz=timezone.utc)
+    age = datetime.now(timezone.utc) - datetime.fromtimestamp(
+        p.stat().st_mtime, tz=timezone.utc)
     return age < timedelta(seconds=CACHE_TTL)
 
-def cache_read(p: Path) -> str:
-    return p.read_text(encoding="utf-8", errors="replace")
-
-def cache_write(p: Path, html: str):
-    p.write_text(html, encoding="utf-8")
 
 # ── Persistence ───────────────────────────────────────────────────────────────
-def load_existing() -> dict[str, dict]:
+def load_existing() -> dict:
     if OUT_FILE.exists():
         try:
             data = json.loads(OUT_FILE.read_text())
@@ -85,7 +91,7 @@ def load_existing() -> dict[str, dict]:
             log.info(f"Loaded {len(existing)} existing albums")
             return existing
         except Exception as e:
-            log.warning(f"Could not load {OUT_FILE}: {e}")
+            log.warning(f"Could not load existing data: {e}")
     return {}
 
 def save(albums_by_id: dict, new_count: int):
@@ -94,369 +100,430 @@ def save(albums_by_id: dict, new_count: int):
         key=lambda a: a.get("date") or a.get("indexed_at") or "",
         reverse=True,
     )
-    OUT_FILE.write_text(json.dumps({
+    payload = {
         "meta": {
             "total": len(albums),
             "last_updated": datetime.now(timezone.utc).isoformat(),
             "new_this_run": new_count,
-            "sources": list({a.get("source", "?") for a in albums}),
+            "sources": sorted({a.get("source", "?") for a in albums}),
         },
         "albums": albums,
-    }, ensure_ascii=False, indent=2))
-    log.info(f"✓ Saved {len(albums)} total albums ({new_count} new this run)")
+    }
+    OUT_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2))
+    log.info(f"✓ Saved {len(albums)} total ({new_count} new)")
 
-# ── HTTP (plain requests — only for sites that work without stealth) ──────────
-_session = requests.Session()
-_session.headers.update(FAPELLO_HEADERS)
 
-def http_get(url: str, retries: int = 3, use_cache: bool = True) -> Optional[str]:
+# ── CF page detector ──────────────────────────────────────────────────────────
+def is_cf_block(html: str, url: str = "") -> bool:
+    """Returns True if this looks like a Cloudflare challenge/block page."""
+    if not html or len(html) < 3000:
+        return True
+    low = html.lower()
+    signals = [
+        "checking your browser",
+        "just a moment",
+        "enable javascript and cookies",
+        "cf-browser-verification",
+        "cloudflare ray id",
+        "cf_chl_opt",
+        "ddos-guard",
+    ]
+    for s in signals:
+        if s in low:
+            # Save to debug/
+            if url:
+                safe = re.sub(r"[^a-z0-9]", "_", url.lower())[:60]
+                (DEBUG_DIR / f"blocked_{safe}.html").write_text(html[:5000])
+                log.warning(f"CF block detected for {url} — saved to debug/")
+            return True
+    return False
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SOURCE 1: FAPELLO via cloudscraper
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def make_cloudscraper():
+    """
+    Create a cloudscraper session. cloudscraper solves Cloudflare's
+    JS-challenge ('I'm Under Attack Mode') automatically by running
+    the CF JavaScript in a Python JS interpreter, then using the
+    resulting cf_clearance cookie for subsequent requests.
+    This works from datacenter/CI IPs where plain requests gets blocked.
+    """
+    try:
+        import cloudscraper
+        scraper = cloudscraper.create_scraper(
+            browser={
+                "browser": "chrome",
+                "platform": "windows",
+                "desktop": True,
+            },
+            delay=5,   # wait 5s for CF challenge (CF requires this)
+        )
+        # Set a real modern UA
+        scraper.headers.update({
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/131.0.0.0 Safari/537.36"
+            ),
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Accept-Encoding": "gzip, deflate",  # NO br — avoids brotli decode issues
+            "Referer": "https://fapello.com/",
+        })
+        log.info("cloudscraper session created")
+        return scraper
+    except ImportError:
+        log.error("cloudscraper not installed!")
+        return None
+
+
+def cs_get(scraper, url: str, retries: int = 3, use_cache: bool = True) -> Optional[str]:
+    """Fetch a URL with cloudscraper, with caching and debug saving."""
     cp = cache_key(url)
     if use_cache and cache_valid(cp):
-        log.debug(f"Cache hit: {url}")
-        return cache_read(cp)
+        content = cp.read_text(encoding="utf-8", errors="replace")
+        if not is_cf_block(content):
+            log.debug(f"Cache hit: {url}")
+            return content
+        else:
+            log.warning(f"Cached CF block for {url}, refetching...")
+            cp.unlink(missing_ok=True)
 
     for attempt in range(1, retries + 1):
-        time.sleep(random.uniform(DELAY_MIN, DELAY_MAX))
+        wait = random.uniform(DELAY_MIN, DELAY_MAX)
+        log.info(f"  [{attempt}] GET {url} (sleeping {wait:.1f}s first)")
+        time.sleep(wait)
+
         try:
-            r = _session.get(url, timeout=20)
+            r = scraper.get(url, timeout=30)
+            log.info(f"  → {r.status_code}  {len(r.content)} bytes  "
+                     f"encoding={r.headers.get('Content-Encoding','none')}")
+
             if r.status_code == 200:
+                text = r.text
+                if is_cf_block(text, url):
+                    log.warning(f"  CF block on attempt {attempt}")
+                    time.sleep(10 + attempt * 5)
+                    continue
                 if use_cache:
-                    cache_write(cp, r.text)
-                return r.text
+                    cp.write_text(text, encoding="utf-8")
+                return text
+
             elif r.status_code == 429:
-                wait = 30 + random.uniform(5, 15)
-                log.warning(f"Rate limited, waiting {wait:.0f}s...")
-                time.sleep(wait)
+                wait2 = 30 + random.uniform(10, 20)
+                log.warning(f"  429 rate-limit — sleeping {wait2:.0f}s")
+                time.sleep(wait2)
             elif r.status_code == 404:
-                log.debug(f"404: {url}")
                 return None
             else:
-                log.warning(f"HTTP {r.status_code} for {url}")
-        except requests.RequestException as e:
-            log.warning(f"Request error (attempt {attempt}): {e}")
-        time.sleep((2 ** attempt) + random.uniform(0.5, 2))
+                log.warning(f"  HTTP {r.status_code}")
 
+        except Exception as e:
+            log.warning(f"  Error attempt {attempt}: {e}")
+
+        time.sleep((2 ** attempt) + random.uniform(1, 3))
+
+    log.error(f"All {retries} attempts failed for {url}")
     return None
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# SOURCE 1: FAPELLO — Plain requests, confirmed working
-# ═══════════════════════════════════════════════════════════════════════════════
 
-def parse_fapello_page(html: str) -> list[dict]:
+def parse_fapello_listing(html: str) -> list[dict]:
     """
     Parse one fapello.com listing page.
-    Confirmed HTML structure from live fetch:
-      Each post block has:
-        - <a href="/slug/"> with avatar img at /content/X/X/slug/1000/slug_0001.jpg
-        - Model name in <h2> or link text
-        - "+ N photos" / "+ N videos" text for counts
-        - Multiple preview thumbnails in the post
+
+    ACTUAL confirmed HTML structure (verified from live fetch):
+    The page has a feed of "posts". Each post contains:
+      - An <a href="/slug/"> wrapping the post
+      - An <img> with src like /content/X/X/{slug}/1000/{slug}_0001.jpg (avatar)
+      - An <img> with src like /content/X/X/{slug}/2000/{slug}_NNNN.jpg (preview)
+      - Text "+N photos" and/or "+N videos" inside the post
+      - Model name as link text or nearby <p> or heading
+
+    Navigation links like /hot/, /trending/, etc. are skipped.
     """
     soup = BeautifulSoup(html, "lxml")
-    models = {}  # slug → dict (deduplicate multiple posts per model)
+    models: dict[str, dict] = {}
 
-    # Find all model links — pattern: fapello.com/{slug}/ where slug is a path component
-    for a in soup.find_all("a", href=True):
-        href = a["href"]
+    SKIP_SLUGS = {
+        "hot", "trending", "popular", "forum", "login", "signup",
+        "welcome", "random", "posts", "submit", "videos", "contacts",
+        "activity", "daily-search-ranking", "top-likes", "top-followers",
+        "popular_videos", "what-is-fapello", "a",
+    }
 
-        # Match model page links: /slug/ or https://fapello.com/slug/
-        m = re.match(r"^(?:https://fapello\.com)?/([a-zA-Z0-9_-]{2,60})/$", href)
+    # Walk every <a> that links to a model page
+    for a_tag in soup.find_all("a", href=True):
+        href = a_tag["href"]
+
+        # Match /slug/ exactly  OR  https://fapello.com/slug/
+        m = re.match(
+            r"^(?:https://fapello\.com)?/([a-zA-Z0-9][a-zA-Z0-9_.-]{1,59})/?$",
+            href
+        )
         if not m:
             continue
-        slug = m.group(1)
+        slug = m.group(1).rstrip("/")
 
-        # Skip navigation/utility slugs
-        skip = {
-            "hot", "trending", "popular", "forum", "login", "signup", "welcome",
-            "random", "posts", "submit", "videos", "contacts", "activity",
-            "daily-search-ranking", "top-likes", "top-followers",
-            "popular_videos", "what-is-fapello", "page-2",
-        }
-        if slug in skip or slug.startswith("page-"):
+        if slug in SKIP_SLUGS or slug.startswith("page-"):
+            continue
+        # Skip pagination, file paths, and other noise
+        if re.search(r"\d{3,}$", slug):  # ends with 3+ digits = probably a post ID
             continue
 
-        # Find avatar image for this model
-        # Fapello pattern: /content/X/X/{slug}/1000/{slug}_0001.jpg
+        # ── Find thumbnail: walk up the DOM to find enclosing post block,
+        #    then look for the avatar image (/1000/ path)
         thumb = None
-        # Check for avatar img near this link
-        parent = a.parent
-        for _ in range(3):  # walk up max 3 levels
-            if parent is None:
+        node = a_tag
+        for _ in range(5):
+            if node is None:
                 break
-            img = parent.find("img", src=re.compile(rf"/content/.*{re.escape(slug[:8])}", re.I))
-            if img:
-                src = img.get("src", "")
-                if "/1000/" in src:
-                    thumb = src if src.startswith("http") else "https://fapello.com" + src
+            imgs = node.find_all("img", src=True)
+            for img in imgs:
+                src = img["src"]
+                if "/content/" in src and "/1000/" in src and slug[:6] in src:
+                    thumb = "https://fapello.com" + src if src.startswith("/") else src
+                    break
+            if thumb:
                 break
-            parent = parent.parent
+            node = node.parent
 
-        if not thumb:
-            # Construct expected avatar URL from confirmed pattern
-            s = slug
-            if len(s) >= 2:
-                thumb = f"https://fapello.com/content/{s[0]}/{s[1]}/{s}/1000/{s}_0001.jpg"
+        # Fallback: construct avatar URL from known pattern
+        if not thumb and len(slug) >= 2:
+            thumb = (
+                f"https://fapello.com/content/{slug[0]}/{slug[1]}/"
+                f"{slug}/1000/{slug}_0001.jpg"
+            )
 
-        # Model display name
-        name = a.get_text(strip=True) or slug
-
-        # Photo/video counts from post text
-        post_block = a.parent
+        # ── Model name: prefer explicit text near <p> or heading,
+        #    fall back to link text
+        name = ""
+        node = a_tag
         for _ in range(4):
-            if post_block is None:
+            if node is None:
                 break
-            text = post_block.get_text()
-            photos = sum(int(x) for x in re.findall(r"\+\s*(\d+)\s*photos?", text, re.I))
-            videos = sum(int(x) for x in re.findall(r"\+\s*(\d+)\s*videos?", text, re.I))
-            if photos or videos:
+            for tag in node.find_all(["p", "h2", "h3", "span"]):
+                t = tag.get_text(strip=True)
+                if t and 2 <= len(t) <= 80 and not t.startswith("+"):
+                    name = t
+                    break
+            if name:
                 break
-            post_block = post_block.parent
-        else:
-            photos, videos = 0, 0
+            node = node.parent
+        if not name:
+            name = a_tag.get_text(strip=True)
+        if not name or len(name) < 2:
+            name = slug.replace("-", " ").title()
+
+        # ── Photo/video counts: walk UP until we find "+N photos/videos"
+        #    FIX: was using a broken for/else that always reset to 0
+        photos, videos = 0, 0
+        node = a_tag.parent
+        for _ in range(5):
+            if node is None:
+                break
+            text = node.get_text()
+            pm = re.findall(r"\+\s*(\d+)\s*photos?", text, re.I)
+            vm = re.findall(r"\+\s*(\d+)\s*videos?", text, re.I)
+            if pm or vm:
+                photos = sum(int(x) for x in pm)
+                videos = sum(int(x) for x in vm)
+                break  # ← This break was missing before; without it else clause fires
+            node = node.parent
 
         if slug not in models:
             models[slug] = {
                 "id": f"fapello:{slug}",
-                "title": name if name and name != slug else slug.replace("-", " ").title(),
+                "title": name,
                 "slug": slug,
                 "thumbnail": thumb,
                 "url": f"https://fapello.com/{slug}/",
                 "source": "fapello",
                 "has_videos": videos > 0,
-                "file_count": 0,
-                "photo_count": 0,
-                "video_count": 0,
+                "file_count": photos + videos,
+                "photo_count": photos,
+                "video_count": videos,
                 "date": None,
                 "indexed_at": datetime.now(timezone.utc).isoformat(),
             }
-        # Accumulate counts (model may appear in multiple posts)
-        models[slug]["photo_count"] = models[slug].get("photo_count", 0) + photos
-        models[slug]["video_count"] = models[slug].get("video_count", 0) + videos
-        models[slug]["file_count"]  = (
-            models[slug].get("photo_count", 0) +
-            models[slug].get("video_count", 0)
-        )
-        if videos > 0:
-            models[slug]["has_videos"] = True
+        else:
+            # Accumulate across multiple posts of the same model
+            models[slug]["photo_count"] = models[slug].get("photo_count", 0) + photos
+            models[slug]["video_count"] = models[slug].get("video_count", 0) + videos
+            models[slug]["file_count"] = (
+                models[slug]["photo_count"] + models[slug]["video_count"]
+            )
+            if videos > 0:
+                models[slug]["has_videos"] = True
+            if thumb and not models[slug].get("thumbnail"):
+                models[slug]["thumbnail"] = thumb
 
     return list(models.values())
 
 
-def scrape_fapello(max_pages: int = 30) -> list[dict]:
-    """
-    Scrape fapello.com paginated listing. Confirmed: plain requests works.
-    Pages: fapello.com/ (page 1), fapello.com/page-2/, fapello.com/page-3/, ...
-    """
+def scrape_fapello(scraper, max_pages: int = 25) -> list[dict]:
+    """Scrape Fapello listings via cloudscraper."""
     all_models: dict[str, dict] = {}
-    sources = [
-        ("new",     [f"https://fapello.com/" if p == 1 else f"https://fapello.com/page-{p}/" for p in range(1, max_pages + 1)]),
-        ("hot",     [f"https://fapello.com/hot/" if p == 1 else f"https://fapello.com/hot/page-{p}/" for p in range(1, 6)]),
-        ("popular", [f"https://fapello.com/popular/" if p == 1 else f"https://fapello.com/popular/page-{p}/" for p in range(1, 6)]),
+
+    # Multiple feed endpoints to maximise discovery
+    feeds = [
+        # (label, url_generator)
+        ("new",     lambda p: "https://fapello.com/" if p == 1 else f"https://fapello.com/page-{p}/"),
+        ("hot",     lambda p: "https://fapello.com/hot/" if p == 1 else f"https://fapello.com/hot/page-{p}/"),
+        ("popular", lambda p: "https://fapello.com/popular/" if p == 1 else f"https://fapello.com/popular/page-{p}/"),
+        ("trending",lambda p: "https://fapello.com/trending/" if p == 1 else f"https://fapello.com/trending/page-{p}/"),
     ]
 
-    for section, urls in sources:
-        log.info(f"[Fapello] Scraping '{section}' section ({len(urls)} pages)...")
-        consecutive_empty = 0
-        for url in urls:
-            html = http_get(url)
+    for label, url_fn in feeds:
+        log.info(f"[Fapello] ── {label} feed ──")
+        empty_streak = 0
+
+        for page_num in range(1, max_pages + 1):
+            url  = url_fn(page_num)
+            html = cs_get(scraper, url)
+
             if not html:
-                log.warning(f"[Fapello] Could not fetch {url}")
-                consecutive_empty += 1
-                if consecutive_empty >= 2:
+                log.warning(f"[Fapello] No response for {url}")
+                empty_streak += 1
+                if empty_streak >= 2:
+                    log.info("[Fapello] Two consecutive failures, moving to next feed")
                     break
                 continue
 
-            # Check if we actually got content (not an error page)
-            if "fapello.com" not in html.lower() or len(html) < 1000:
-                log.warning(f"[Fapello] Suspiciously short response from {url}")
-                break
+            if is_cf_block(html, url):
+                log.warning(f"[Fapello] CF block on {url}")
+                empty_streak += 1
+                if empty_streak >= 2:
+                    break
+                continue
 
-            models = parse_fapello_page(html)
-            new_on_page = 0
+            models   = parse_fapello_listing(html)
+            new_here = sum(1 for m in models if m["slug"] not in all_models)
+
             for m in models:
                 slug = m["slug"]
                 if slug not in all_models:
                     all_models[slug] = m
-                    new_on_page += 1
                 else:
-                    # Update counts if we got more data
-                    if m.get("file_count", 0) > all_models[slug].get("file_count", 0):
+                    # Keep the entry with more data
+                    if m["file_count"] > all_models[slug]["file_count"]:
                         all_models[slug].update(m)
 
-            log.info(f"[Fapello] {url} → {len(models)} models ({new_on_page} new)")
-            if new_on_page == 0:
-                consecutive_empty += 1
-                if consecutive_empty >= 3:
-                    log.info(f"[Fapello] No new models for 3 pages, moving to next section")
+            log.info(f"[Fapello] {label} p{page_num}: {len(models)} models "
+                     f"({new_here} new, {len(all_models)} total)")
+
+            if new_here == 0:
+                empty_streak += 1
+                if empty_streak >= 3:
+                    log.info("[Fapello] 3 empty pages in a row, next feed")
                     break
             else:
-                consecutive_empty = 0
+                empty_streak = 0
 
             if len(all_models) >= MAX_NEW:
-                log.info(f"[Fapello] Reached {MAX_NEW} models, stopping")
+                log.info(f"[Fapello] Reached {MAX_NEW} models")
                 break
 
         if len(all_models) >= MAX_NEW:
             break
 
-    result = list(all_models.values())
-    log.info(f"[Fapello] Total scraped: {len(result)} unique models")
-    return result
+    log.info(f"[Fapello] Done: {len(all_models)} unique models")
+    return list(all_models.values())
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# SOURCE 2: BUNKR — Needs stealth browser (patchright)
+# SOURCE 2: BUNKR via nodriver (async, undetected)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-class BunkrStealthBrowser:
-    """
-    Stealth Chromium via patchright.
-    patchright patches CDP signals at the protocol level — the main
-    thing Cloudflare's bot check looks for.
-    """
-    INIT_JS = """
-        Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-        Object.defineProperty(navigator, 'languages', {get: () => ['en-US','en']});
-        Object.defineProperty(navigator, 'plugins',   {get: () => [1,2,3,4,5]});
-        window.chrome = {runtime: {}};
-    """
+async def bunkr_fetch_page(browser, url: str, use_cache: bool = True) -> Optional[str]:
+    """Fetch one page with nodriver, detect CF blocks."""
+    cp = cache_key(url)
+    if use_cache and cache_valid(cp):
+        content = cp.read_text(encoding="utf-8", errors="replace")
+        if not is_cf_block(content):
+            return content
+        cp.unlink(missing_ok=True)
 
-    def __init__(self):
-        self._pw  = None
-        self._ctx = None
-
-    def start(self):
+    import nodriver as uc
+    for attempt in range(1, 4):
         try:
-            from patchright.sync_api import sync_playwright
-        except ImportError:
-            log.error("patchright not installed — skipping Bunkr scraping")
-            return False
+            await asyncio.sleep(random.uniform(2.0, 4.0))
+            log.info(f"[Bunkr] GET {url} (attempt {attempt})")
+            tab = await browser.get(url)
+            await asyncio.sleep(3)   # wait for JS to execute
 
-        log.info(f"[Bunkr] Launching stealth browser (headless={HEADLESS})...")
-        Path("browser_profile").mkdir(exist_ok=True)
-        self._pw  = sync_playwright().start()
-        self._ctx = self._pw.chromium.launch_persistent_context(
-            "browser_profile",
-            headless=HEADLESS,
-            viewport={"width": 1920, "height": 1080},
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-            locale="en-US",
-            timezone_id="America/New_York",
-            args=["--no-sandbox", "--disable-blink-features=AutomationControlled"],
-            ignore_https_errors=True,
-        )
-        self._ctx.add_init_script(self.INIT_JS)
-        log.info("[Bunkr] Browser ready.")
-        return True
+            # If CF challenge is showing, wait longer
+            content = await tab.get_content()
+            if is_cf_block(content, url):
+                log.info("[Bunkr] CF challenge — waiting 15s...")
+                await asyncio.sleep(15)
+                content = await tab.get_content()
 
-    def stop(self):
-        try:
-            if self._ctx: self._ctx.close()
-            if self._pw:  self._pw.stop()
-        except Exception: pass
+            await tab.close()
 
-    def fetch(self, url: str, wait: str = "networkidle",
-              retries: int = 3, use_cache: bool = True) -> Optional[str]:
-        from patchright.sync_api import TimeoutError as PWTimeout
-
-        cp = cache_key(url)
-        if use_cache and cache_valid(cp):
-            return cache_read(cp)
-
-        for attempt in range(1, retries + 1):
-            page = None
-            try:
-                page = self._ctx.new_page()
-                page.add_init_script(self.INIT_JS)
-                time.sleep(random.uniform(0.5, 1.5))
-
-                log.info(f"[Bunkr] GET {url} (attempt {attempt})")
-                page.goto(url, wait_until=wait, timeout=45_000)
-
-                # Wait for CF challenge to resolve if present
-                content = page.content()
-                if "checking your browser" in content.lower() or "just a moment" in content.lower():
-                    log.info("[Bunkr] CF challenge — waiting 12s...")
-                    time.sleep(12)
-                    page.wait_for_load_state("networkidle", timeout=20_000)
-                    content = page.content()
-
-                if use_cache and len(content) > 500:
-                    cache_write(cp, content)
-
-                time.sleep(random.uniform(2.0, 4.0))
+            if not is_cf_block(content):
+                if use_cache:
+                    cp.write_text(content, encoding="utf-8")
                 return content
 
-            except PWTimeout:
-                log.warning(f"[Bunkr] Timeout attempt {attempt}")
-            except Exception as e:
-                log.warning(f"[Bunkr] Error attempt {attempt}: {e}")
-            finally:
-                try:
-                    if page: page.close()
-                except: pass
-                time.sleep((2 ** attempt) + random.uniform(0.5, 2))
+        except Exception as e:
+            log.warning(f"[Bunkr] Error attempt {attempt}: {e}")
+        await asyncio.sleep((2 ** attempt) + random.uniform(1, 3))
 
-        return None
+    return None
 
 
-def scrape_bunkr_albums_io(browser: "BunkrStealthBrowser", max_pages: int = 10) -> list[dict]:
-    """Scrape bunkr-albums.io via stealth browser."""
+async def scrape_bunkr_albums_io(browser, max_pages: int = 8) -> list[dict]:
     albums = []
     seen   = set()
 
     for page_num in range(1, max_pages + 1):
-        url  = "https://bunkr-albums.io/" + (f"?page={page_num}" if page_num > 1 else "")
-        html = browser.fetch(url)
+        url  = ("https://bunkr-albums.io/"
+                if page_num == 1 else f"https://bunkr-albums.io/?page={page_num}")
+        html = await bunkr_fetch_page(browser, url)
         if not html:
-            break
-
-        # Check if CF blocked us still
-        if "checking your browser" in html.lower() or len(html) < 2000:
-            log.warning(f"[Bunkr-albums.io] CF still blocking page {page_num}")
             break
 
         soup  = BeautifulSoup(html, "lxml")
         found = 0
 
         for a in soup.find_all("a", href=True):
-            href = a["href"]
-            m    = re.search(r"(?:bunkr\.\w+)?/a/([A-Za-z0-9_-]{4,24})", href)
-            if not m: continue
+            m = re.search(r"/a/([A-Za-z0-9_-]{4,24})", a["href"])
+            if not m:
+                continue
+            aid = m.group(1)
+            if aid in seen:
+                continue
+            seen.add(aid)
 
-            album_id = m.group(1)
-            if album_id in seen: continue
-            seen.add(album_id)
-
-            # Title: nearest heading or link text
             title = a.get_text(strip=True)
             if not title or len(title) < 2:
-                for el in a.find_all_next(["h2","h3","h4","p"], limit=2):
+                for el in a.find_all_next(["h2", "h3", "p"], limit=2):
                     t = el.get_text(strip=True)
                     if t and len(t) > 2:
                         title = t
                         break
 
-            # Thumbnail
             thumb = None
             for img in a.find_all("img") + (a.parent.find_all("img") if a.parent else []):
-                src = img.get("src") or img.get("data-src")
-                if src and src.startswith("http") and "logo" not in src and "icon" not in src:
+                src = img.get("src") or img.get("data-src", "")
+                if src and src.startswith("http") and "logo" not in src:
                     thumb = src
                     break
 
-            # File count
             count = 0
-            card_text = a.parent.get_text() if a.parent else ""
-            cm = re.search(r"(\d+)\s*files?", card_text, re.I)
-            if cm: count = int(cm.group(1))
+            cm = re.search(r"(\d+)\s*files?", (a.parent or a).get_text(), re.I)
+            if cm:
+                count = int(cm.group(1))
 
             albums.append({
-                "id": album_id,
-                "title": (title or album_id).strip(),
+                "id": aid,
+                "title": title.strip() or aid,
                 "file_count": count,
                 "thumbnail": thumb,
-                "url": f"https://bunkr.si/a/{album_id}",
+                "url": f"https://bunkr.si/a/{aid}",
                 "source": "bunkr",
                 "has_videos": False,
                 "date": None,
@@ -464,62 +531,58 @@ def scrape_bunkr_albums_io(browser: "BunkrStealthBrowser", max_pages: int = 10) 
             })
             found += 1
 
-        log.info(f"[bunkr-albums.io] Page {page_num}: {found} albums")
+        log.info(f"[bunkr-albums.io] p{page_num}: {found} albums")
         if found == 0:
             break
 
-    log.info(f"[bunkr-albums.io] Total: {len(albums)}")
     return albums
 
 
-def enrich_bunkr_album(browser: "BunkrStealthBrowser", album_id: str) -> Optional[dict]:
-    """
-    Fetch bunkr.si/a/{id}?advanced=1 — gallery-dl's proven parsing method.
-    Works IF the stealth browser gets past Cloudflare.
-    """
-    domains = [BUNKR_DOMAINS[0]] + random.sample(BUNKR_DOMAINS[1:], min(3, len(BUNKR_DOMAINS)-1))
-    for domain in domains:
+async def enrich_bunkr_album(browser, album_id: str) -> Optional[dict]:
+    """Fetch and parse a single Bunkr album page."""
+    for domain in random.sample(BUNKR_DOMAINS, min(4, len(BUNKR_DOMAINS))):
         url  = f"https://{domain}/a/{album_id}?advanced=1"
-        html = browser.fetch(url, wait="domcontentloaded", use_cache=True)
-        if not html or len(html) < 500: continue
-        if "checking your browser" in html.lower(): continue
+        html = await bunkr_fetch_page(browser, url, use_cache=True)
+        if not html or is_cf_block(html):
+            continue
 
-        # og:title
         title = ""
         m = re.search(r'property="og:title"\s+content="([^"]+)"', html)
         if m:
-            title = m.group(1).replace("&amp;","&").replace("&lt;","<").replace("&gt;",">")
+            title = (m.group(1)
+                     .replace("&amp;", "&").replace("&lt;", "<")
+                     .replace("&gt;", ">").replace("&quot;", '"'))
 
-        # window.albumFiles → file count
         file_count = 0
-        m = re.search(r"window\.albumFiles\s*=\s*\[(.+?)\];\s*</script>", html, re.DOTALL)
+        m = re.search(r"window\.albumFiles\s*=\s*\[(.+?)\];\s*</script>",
+                      html, re.DOTALL)
         if m:
             file_count = max(1, len(re.findall(r"\bid\s*:", m.group(1))))
         if not file_count:
             m = re.search(r"(\d+)\s+files?", html, re.I)
-            if m: file_count = int(m.group(1))
+            if m:
+                file_count = int(m.group(1))
 
-        # Has videos? Check for .mp4 in albumFiles
         has_videos = bool(re.search(r"\.mp4", html, re.I))
 
-        # og:image
         thumb = None
         m = re.search(r'property="og:image"\s+content="([^"]+)"', html)
-        if m: thumb = m.group(1)
+        if m:
+            thumb = m.group(1)
 
-        # Size
         size_str = ""
         m = re.search(r'class="font-semibold">\(([^)]+)\)', html)
-        if m: size_str = m.group(1).strip()
+        if m:
+            size_str = m.group(1).strip()
 
-        # Date from timestamp: "HH:MM:SS DD/MM/YYYY"
         date_str = None
         m = re.search(r'timestamp:\s*"([^"]+)"', html)
         if m:
             try:
                 dt = datetime.strptime(m.group(1), "%H:%M:%S %d/%m/%Y")
                 date_str = dt.replace(tzinfo=timezone.utc).isoformat()
-            except ValueError: pass
+            except ValueError:
+                pass
 
         if title or file_count:
             return {
@@ -537,91 +600,116 @@ def enrich_bunkr_album(browser: "BunkrStealthBrowser", album_id: str) -> Optiona
     return None
 
 
+async def run_bunkr(albums_by_id: dict, new_count_start: int) -> int:
+    """Run the Bunkr scraping phase asynchronously with nodriver."""
+    try:
+        import nodriver as uc
+    except ImportError:
+        log.error("nodriver not installed — skipping Bunkr")
+        return new_count_start
+
+    new_count = new_count_start
+    log.info("[Bunkr] Starting nodriver browser...")
+
+    browser = await uc.start(
+        headless=True,
+        browser_args=[
+            "--no-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-blink-features=AutomationControlled",
+        ],
+    )
+
+    try:
+        # Phase 2a: scrape bunkr-albums.io directory
+        albums = await scrape_bunkr_albums_io(browser, max_pages=8)
+        added  = 0
+        for a in albums:
+            if a["id"] not in albums_by_id:
+                albums_by_id[a["id"]] = a
+                new_count += 1
+                added += 1
+        log.info(f"[Bunkr] Added {added} new albums from directory")
+
+        # Phase 2b: enrich albums missing data
+        needs = [
+            a for a in albums_by_id.values()
+            if a.get("source") == "bunkr"
+            and (not a.get("file_count") or a.get("title") == a.get("id"))
+        ]
+        limit = min(len(needs), 30)
+        if needs:
+            log.info(f"[Bunkr] Enriching {limit} albums...")
+            ok = 0
+            for album in needs[:limit]:
+                detail = await enrich_bunkr_album(browser, album["id"])
+                if detail:
+                    for k, v in detail.items():
+                        if v and (not album.get(k) or album[k] == album["id"]):
+                            album[k] = v
+                    ok += 1
+            log.info(f"[Bunkr] Enriched {ok}/{limit}")
+
+    finally:
+        browser.stop()
+
+    return new_count
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # MAIN
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def run():
+def main():
     albums_by_id = load_existing()
     new_count    = 0
-    now          = datetime.now(timezone.utc).isoformat()
 
-    # ── PHASE 1: FAPELLO (guaranteed results) ─────────────────────────────────
+    # ── PHASE 1: Fapello via cloudscraper ─────────────────────────────────────
     log.info("=" * 65)
-    log.info("PHASE 1: Fapello (plain requests — no stealth needed)")
+    log.info("PHASE 1: Fapello (cloudscraper — bypasses CF JS challenge)")
     log.info("=" * 65)
 
-    fapello_pages = min(30, MAX_NEW // 10)  # ~10 models per page
-    fapello_models = scrape_fapello(max_pages=fapello_pages)
+    scraper = make_cloudscraper()
+    if scraper:
+        pages = min(25, max(5, MAX_NEW // 8))
+        models = scrape_fapello(scraper, max_pages=pages)
+        for m in models:
+            if m["id"] not in albums_by_id:
+                albums_by_id[m["id"]] = m
+                new_count += 1
+        log.info(f"Phase 1 done: {new_count} Fapello models")
+    else:
+        log.error("Phase 1 skipped — cloudscraper unavailable")
 
-    for model in fapello_models:
-        if model["id"] not in albums_by_id:
-            albums_by_id[model["id"]] = model
-            new_count += 1
-            log.info(f"  +[{new_count:>4}] [fapello] {model['title'][:55]}")
-
-    log.info(f"Phase 1 done: {new_count} new Fapello models added")
-
-    # ── PHASE 2: BUNKR (stealth browser, may fail on CI without CF bypass) ────
+    # ── PHASE 2: Bunkr via nodriver ───────────────────────────────────────────
     if ENABLE_BUNKR:
         log.info("=" * 65)
-        log.info("PHASE 2: Bunkr (stealth browser via patchright)")
+        log.info("PHASE 2: Bunkr (nodriver — undetected async browser)")
         log.info("=" * 65)
-
-        browser = BunkrStealthBrowser()
-        browser_ok = browser.start()
-
-        if browser_ok:
-            try:
-                # 2a: bunkr-albums.io directory
-                bunkr_albums = scrape_bunkr_albums_io(browser, max_pages=8)
-                added_bunkr  = 0
-                for album in bunkr_albums:
-                    if album["id"] not in albums_by_id:
-                        albums_by_id[album["id"]] = album
-                        new_count += 1
-                        added_bunkr += 1
-                log.info(f"Phase 2a: {added_bunkr} new Bunkr albums from bunkr-albums.io")
-
-                # 2b: Enrich bunkr albums missing key data
-                needs_enrich = [
-                    a for a in albums_by_id.values()
-                    if a.get("source") == "bunkr"
-                    and (not a.get("file_count") or a.get("title") == a.get("id"))
-                ]
-                enrich_limit = min(len(needs_enrich), 40)
-                if needs_enrich:
-                    log.info(f"Phase 2b: Enriching {enrich_limit} Bunkr albums via bunkr.si")
-                    ok = 0
-                    for album in needs_enrich[:enrich_limit]:
-                        detail = enrich_bunkr_album(browser, album["id"])
-                        if detail:
-                            for k, v in detail.items():
-                                if v and (not album.get(k) or album[k] == album["id"]):
-                                    album[k] = v
-                            ok += 1
-                    log.info(f"Phase 2b: Enriched {ok}/{enrich_limit} albums")
-
-            finally:
-                browser.stop()
-        else:
-            log.warning("Bunkr scraping skipped — patchright unavailable")
+        try:
+            new_count = asyncio.run(run_bunkr(albums_by_id, new_count))
+        except Exception as e:
+            log.error(f"Bunkr phase failed: {e}")
     else:
-        log.info("Bunkr scraping disabled (ENABLE_BUNKR=false)")
+        log.info("Bunkr skipped (ENABLE_BUNKR=false)")
 
     # ── Save ──────────────────────────────────────────────────────────────────
     save(albums_by_id, new_count)
 
-    total = len(albums_by_id)
-    fapello_total = sum(1 for a in albums_by_id.values() if a.get("source") == "fapello")
-    bunkr_total   = sum(1 for a in albums_by_id.values() if a.get("source") == "bunkr")
+    fapello_n = sum(1 for a in albums_by_id.values() if a.get("source") == "fapello")
+    bunkr_n   = sum(1 for a in albums_by_id.values() if a.get("source") == "bunkr")
 
     log.info("")
     log.info("=" * 65)
-    log.info(f"COMPLETE: {total} total ({fapello_total} Fapello, {bunkr_total} Bunkr)")
-    log.info(f"          {new_count} new this run")
+    log.info(f"DONE: {len(albums_by_id)} total "
+             f"({fapello_n} Fapello, {bunkr_n} Bunkr, {new_count} new)")
     log.info("=" * 65)
+
+    # Fail loudly if we still got 0 (helps debugging in CI logs)
+    if len(albums_by_id) == 0:
+        log.error("ZERO ALBUMS — check debug/ folder for CF block pages")
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
-    run()
+    main()

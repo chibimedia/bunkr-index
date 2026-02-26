@@ -19,10 +19,11 @@ for a in albums:
     source   = a.get("source", "?")
     date_raw = a.get("date") or a.get("indexed_at") or updated
     try:
-        dt       = datetime.fromisoformat(date_raw.replace("Z","+00:00"))
+        dt       = datetime.fromisoformat(date_raw.replace("Z", "+00:00"))
         pub_date = dt.strftime("%a, %d %b %Y %H:%M:%S +0000")
     except Exception:
         pub_date = updated[:25] + " +0000"
+
     items.append(f"""    <item>
       <title>{title}</title>
       <link>{link}</link>
@@ -36,7 +37,7 @@ rss = f"""<?xml version="1.0" encoding="UTF-8"?>
   <channel>
     <title>MediaIndex — Latest</title>
     <link>{SITE_URL}</link>
-    <description>Searchable index of Fapello &amp; Bunkr albums</description>
+    <description>Fapello &amp; Bunkr album index</description>
     <language>en-us</language>
     <lastBuildDate>{updated[:25]} +0000</lastBuildDate>
     <atom:link href="{SITE_URL}/feed.xml" rel="self" type="application/rss+xml"/>
@@ -45,4 +46,4 @@ rss = f"""<?xml version="1.0" encoding="UTF-8"?>
 </rss>"""
 
 Path("feed.xml").write_text(rss.strip())
-print(f"Generated feed.xml with {len(items)} items")
+print(f"✓ feed.xml — {len(items)} items")
