@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Generate feed.xml from albums.json"""
 import json
 from pathlib import Path
 from datetime import datetime
@@ -14,30 +13,30 @@ updated = data.get("meta", {}).get("last_updated", datetime.utcnow().isoformat()
 items = []
 for a in albums:
     title    = escape(a.get("title") or a.get("id") or "Untitled")
-    link     = escape(a.get("url") or f"https://bunkr.si/a/{a.get('id','')}")
+    link     = escape(a.get("url") or "#")
     guid     = escape(str(a.get("id", "")))
     count    = a.get("file_count", 0)
+    source   = a.get("source", "?")
     date_raw = a.get("date") or a.get("indexed_at") or updated
     try:
-        dt       = datetime.fromisoformat(date_raw.replace("Z", "+00:00"))
+        dt       = datetime.fromisoformat(date_raw.replace("Z","+00:00"))
         pub_date = dt.strftime("%a, %d %b %Y %H:%M:%S +0000")
     except Exception:
         pub_date = updated[:25] + " +0000"
-
     items.append(f"""    <item>
       <title>{title}</title>
       <link>{link}</link>
       <guid isPermaLink="false">{guid}</guid>
       <pubDate>{pub_date}</pubDate>
-      <description>{escape(f'{count} files')}</description>
+      <description>{escape(f'{count} files [{source}]')}</description>
     </item>""")
 
 rss = f"""<?xml version="1.0" encoding="UTF-8"?>
 <rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom">
   <channel>
-    <title>BunkrIndex — Latest Albums</title>
+    <title>MediaIndex — Latest</title>
     <link>{SITE_URL}</link>
-    <description>Searchable index of public Bunkr albums</description>
+    <description>Searchable index of Fapello &amp; Bunkr albums</description>
     <language>en-us</language>
     <lastBuildDate>{updated[:25]} +0000</lastBuildDate>
     <atom:link href="{SITE_URL}/feed.xml" rel="self" type="application/rss+xml"/>

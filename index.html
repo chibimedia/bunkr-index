@@ -3,68 +3,137 @@
 <head>
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
-  <title>BunkrIndex — Album Discovery</title>
-  <meta name="description" content="The fastest, most complete searchable index of Bunkr albums."/>
+  <title>MediaIndex — Fapello & Bunkr Discovery</title>
+  <meta name="description" content="Searchable index of Fapello models and Bunkr albums. Fast, filterable, updated automatically."/>
   <meta name="theme-color" content="#0a0a0f"/>
-  <link rel="alternate" type="application/rss+xml" title="BunkrIndex RSS" href="feed.xml"/>
+  <link rel="alternate" type="application/rss+xml" title="MediaIndex RSS" href="feed.xml"/>
   <link rel="preconnect" href="https://fonts.googleapis.com"/>
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
   <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet"/>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/lunr.js/2.3.9/lunr.min.js" crossorigin="anonymous"></script>
   <style>
-    :root{--bg:#0a0a0f;--surface:#13131a;--surface2:#1c1c28;--border:#252535;--accent:#5b4fff;--accent2:#ff4f8b;--text:#e8e8f0;--muted:#6b6b85;--radius:12px;--glow:0 0 40px rgba(91,79,255,.18)}
+    :root{
+      --bg:#0a0a0f; --surface:#13131a; --surface2:#1c1c28; --border:#252535;
+      --accent:#5b4fff; --accent2:#ff4f8b; --green:#22c55e;
+      --text:#e8e8f0; --muted:#6b6b85; --radius:12px;
+      --glow:0 0 40px rgba(91,79,255,.18);
+    }
     *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
     body{background:var(--bg);color:var(--text);font-family:'Syne',sans-serif;min-height:100vh;overflow-x:hidden}
-    body::before{content:'';position:fixed;inset:0;pointer-events:none;z-index:0;background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.03'/%3E%3C/svg%3E")}
-    .orb{position:fixed;border-radius:50%;filter:blur(120px);pointer-events:none;z-index:0;opacity:.3}
+    body::before{content:'';position:fixed;inset:0;pointer-events:none;z-index:0;opacity:.03;
+      background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E")}
+    .orb{position:fixed;border-radius:50%;filter:blur(120px);pointer-events:none;z-index:0;opacity:.28}
     .orb-1{width:500px;height:500px;background:var(--accent);top:-200px;left:-150px}
     .orb-2{width:400px;height:400px;background:var(--accent2);bottom:-150px;right:-100px}
+
+    /* ── Header ── */
     header{position:relative;padding:3rem 2rem 0;text-align:center;z-index:1}
-    .logo{font-size:clamp(2.2rem,6vw,4rem);font-weight:800;letter-spacing:-.03em;line-height:1;margin-bottom:.5rem;background:linear-gradient(135deg,#fff 0%,var(--accent) 50%,var(--accent2) 100%);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
-    .tagline{color:var(--muted);font-size:.9rem;letter-spacing:.1em;text-transform:uppercase;margin-bottom:2rem}
-    #stats-bar{display:flex;justify-content:center;gap:2rem;margin:0 auto 2rem;font-family:'DM Mono',monospace;font-size:.8rem;color:var(--muted)}
+    .logo{font-size:clamp(2rem,5.5vw,3.8rem);font-weight:800;letter-spacing:-.03em;line-height:1;margin-bottom:.4rem;
+      background:linear-gradient(135deg,#fff 0%,var(--accent) 50%,var(--accent2) 100%);
+      -webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
+    .tagline{color:var(--muted);font-size:.85rem;letter-spacing:.1em;text-transform:uppercase;margin-bottom:1.5rem}
+    #stats-bar{display:flex;justify-content:center;gap:1.5rem;flex-wrap:wrap;margin:0 auto 1.5rem;
+      font-family:'DM Mono',monospace;font-size:.78rem;color:var(--muted)}
     #stats-bar strong{color:var(--text);font-weight:500}
-    .controls{position:sticky;top:0;z-index:100;background:linear-gradient(to bottom,rgba(10,10,15,.98) 80%,transparent);padding:1.2rem 2rem 1.5rem;backdrop-filter:blur(12px)}
-    .search-wrap{position:relative;max-width:680px;margin:0 auto .9rem}
+    .source-pill{display:inline-flex;align-items:center;gap:.3rem;padding:.2rem .6rem;border-radius:999px;font-size:.7rem;font-family:'DM Mono',monospace}
+    .pill-fapello{background:rgba(255,79,139,.15);color:var(--accent2);border:1px solid rgba(255,79,139,.3)}
+    .pill-bunkr{background:rgba(91,79,255,.15);color:#818cf8;border:1px solid rgba(91,79,255,.3)}
+
+    /* ── Controls ── */
+    .controls{position:sticky;top:0;z-index:100;
+      background:linear-gradient(to bottom,rgba(10,10,15,.97) 82%,transparent);
+      padding:1.1rem 2rem 1.4rem;backdrop-filter:blur(14px)}
+    .search-wrap{position:relative;max-width:680px;margin:0 auto .85rem}
     .search-icon{position:absolute;left:1.1rem;top:50%;transform:translateY(-50%);color:var(--muted);pointer-events:none}
-    #search{width:100%;padding:.85rem 1.1rem .85rem 3rem;background:var(--surface);border:1.5px solid var(--border);border-radius:var(--radius);color:var(--text);font-family:'Syne',sans-serif;font-size:1rem;outline:none;transition:border-color .2s,box-shadow .2s}
+    #search{width:100%;padding:.82rem 1.1rem .82rem 3rem;background:var(--surface);
+      border:1.5px solid var(--border);border-radius:var(--radius);color:var(--text);
+      font-family:'Syne',sans-serif;font-size:.97rem;outline:none;transition:border-color .2s,box-shadow .2s}
     #search::placeholder{color:var(--muted)}
     #search:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(91,79,255,.18)}
-    .filter-row{display:flex;gap:.6rem;justify-content:center;flex-wrap:wrap;max-width:680px;margin:0 auto}
-    select,.filter-btn{padding:.42rem .85rem;background:var(--surface);border:1.5px solid var(--border);border-radius:999px;color:var(--text);font-family:'Syne',sans-serif;font-size:.8rem;cursor:pointer;outline:none;transition:border-color .2s,background .2s;-webkit-appearance:none}
+
+    .filter-row{display:flex;gap:.5rem;justify-content:center;flex-wrap:wrap;max-width:760px;margin:0 auto}
+    select,.filter-btn{padding:.38rem .8rem;background:var(--surface);border:1.5px solid var(--border);
+      border-radius:999px;color:var(--text);font-family:'Syne',sans-serif;font-size:.78rem;
+      cursor:pointer;outline:none;transition:border-color .2s,background .2s;-webkit-appearance:none}
     select:hover,.filter-btn:hover{border-color:var(--accent);background:var(--surface2)}
     .filter-btn.active{background:var(--accent);border-color:var(--accent);color:#fff}
-    #result-count{text-align:center;font-family:'DM Mono',monospace;font-size:.75rem;color:var(--muted);margin-top:.5rem}
+    .filter-btn.active-fapello{background:rgba(255,79,139,.25);border-color:var(--accent2);color:var(--accent2)}
+    .filter-btn.active-bunkr{background:rgba(91,79,255,.25);border-color:#818cf8;color:#818cf8}
+    .filter-btn.active-videos{background:rgba(34,197,94,.2);border-color:var(--green);color:var(--green)}
+
+    #result-count{text-align:center;font-family:'DM Mono',monospace;font-size:.73rem;color:var(--muted);margin-top:.45rem}
+
+    /* ── Grid ── */
     main{position:relative;z-index:1;padding:0 1.5rem 4rem;max-width:1600px;margin:0 auto}
-    #grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:1.1rem}
-    .card{background:var(--surface);border:1.5px solid var(--border);border-radius:var(--radius);overflow:hidden;transition:transform .22s cubic-bezier(.22,1,.36,1),box-shadow .22s,border-color .22s;text-decoration:none;color:var(--text);display:flex;flex-direction:column;animation:fadeUp .4s cubic-bezier(.22,1,.36,1) backwards}
+    #grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(215px,1fr));gap:1rem}
+
+    /* ── Card ── */
+    .card{background:var(--surface);border:1.5px solid var(--border);border-radius:var(--radius);
+      overflow:hidden;transition:transform .22s cubic-bezier(.22,1,.36,1),box-shadow .22s,border-color .22s;
+      text-decoration:none;color:var(--text);display:flex;flex-direction:column;
+      animation:fadeUp .38s cubic-bezier(.22,1,.36,1) backwards}
     .card:hover{transform:translateY(-4px);border-color:var(--accent);box-shadow:var(--glow);background:#1e1e2e}
-    @keyframes fadeUp{from{opacity:0;transform:translateY(18px)}to{opacity:1;transform:translateY(0)}}
+    @keyframes fadeUp{from{opacity:0;transform:translateY(16px)}to{opacity:1;transform:translateY(0)}}
+
     .card-thumb{aspect-ratio:16/10;background:var(--surface2);overflow:hidden;position:relative}
     .card-thumb img{width:100%;height:100%;object-fit:cover;display:block;transition:transform .3s}
     .card:hover .card-thumb img{transform:scale(1.06)}
-    .thumb-placeholder{width:100%;height:100%;display:flex;align-items:center;justify-content:center;font-size:2rem;color:var(--border);background:linear-gradient(135deg,var(--surface2) 0%,var(--surface) 100%)}
-    .card-badge{position:absolute;bottom:.5rem;right:.5rem;background:rgba(0,0,0,.75);color:#fff;font-family:'DM Mono',monospace;font-size:.68rem;padding:.2rem .5rem;border-radius:999px;backdrop-filter:blur(4px)}
-    .card-body{padding:.75rem .85rem .85rem;flex:1;display:flex;flex-direction:column;gap:.3rem}
-    .card-title{font-size:.88rem;font-weight:600;line-height:1.35;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
-    .card-meta{font-family:'DM Mono',monospace;font-size:.72rem;color:var(--muted);margin-top:auto}
-    #loader{display:flex;align-items:center;justify-content:center;padding:6rem 2rem;gap:.7rem;color:var(--muted);font-family:'DM Mono',monospace;font-size:.85rem}
-    .spinner{width:20px;height:20px;border:2px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin .8s linear infinite}
+    .thumb-placeholder{width:100%;height:100%;display:flex;align-items:center;justify-content:center;
+      font-size:2rem;color:var(--border);background:linear-gradient(135deg,var(--surface2),var(--surface))}
+
+    /* Badges on thumb */
+    .card-badges{position:absolute;bottom:.45rem;right:.45rem;display:flex;gap:.3rem;flex-direction:column;align-items:flex-end}
+    .badge{display:inline-flex;align-items:center;gap:.25rem;background:rgba(0,0,0,.75);color:#fff;
+      font-family:'DM Mono',monospace;font-size:.65rem;padding:.18rem .45rem;border-radius:999px;
+      backdrop-filter:blur(4px);white-space:nowrap}
+    .badge-video{background:rgba(34,197,94,.85);color:#fff}
+    .badge-source-fapello{background:rgba(255,79,139,.85)}
+    .badge-source-bunkr{background:rgba(91,79,255,.85)}
+
+    .card-body{padding:.7rem .8rem .8rem;flex:1;display:flex;flex-direction:column;gap:.25rem}
+    .card-title{font-size:.85rem;font-weight:600;line-height:1.35;
+      display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+    .card-meta{font-family:'DM Mono',monospace;font-size:.7rem;color:var(--muted);margin-top:auto}
+
+    /* ── States ── */
+    #loader{display:flex;align-items:center;justify-content:center;padding:5rem 2rem;gap:.7rem;
+      color:var(--muted);font-family:'DM Mono',monospace;font-size:.85rem}
+    .spinner{width:20px;height:20px;border:2px solid var(--border);border-top-color:var(--accent);
+      border-radius:50%;animation:spin .8s linear infinite}
     @keyframes spin{to{transform:rotate(360deg)}}
+
     #empty{display:none;text-align:center;padding:5rem 2rem;color:var(--muted)}
-    #empty .empty-icon{font-size:3rem;margin-bottom:1rem}
-    .first-run{display:none;text-align:center;padding:4rem 2rem;background:linear-gradient(135deg,rgba(91,79,255,.08),rgba(255,79,139,.08));border:1.5px solid var(--border);border-radius:var(--radius);margin:2rem auto;max-width:640px}
+    #empty .ei{font-size:3rem;margin-bottom:1rem}
+
+    .first-run{display:none;text-align:center;padding:3.5rem 2rem;
+      background:linear-gradient(135deg,rgba(91,79,255,.07),rgba(255,79,139,.07));
+      border:1.5px solid var(--border);border-radius:var(--radius);margin:2rem auto;max-width:620px}
     .first-run .icon{font-size:3rem;margin-bottom:1rem}
-    .first-run h2{font-size:1.3rem;margin-bottom:.75rem}
-    .first-run p{font-size:.9rem;color:var(--muted);line-height:1.6;margin:.4rem 0}
-    .first-run code{background:var(--surface2);padding:.15rem .45rem;border-radius:4px;font-family:'DM Mono',monospace;font-size:.8rem;color:var(--accent)}
-    .step{background:var(--surface2);border-radius:8px;padding:.75rem 1rem;margin:.5rem 0;text-align:left;font-size:.85rem;border-left:3px solid var(--accent)}
-    footer{position:relative;z-index:1;text-align:center;padding:2rem;font-family:'DM Mono',monospace;font-size:.75rem;color:var(--muted);border-top:1px solid var(--border)}
+    .first-run h2{font-size:1.25rem;margin-bottom:.75rem}
+    .first-run p{font-size:.88rem;color:var(--muted);line-height:1.6;margin:.35rem 0}
+    .step{background:var(--surface2);border-radius:8px;padding:.65rem .9rem;margin:.4rem 0;
+      text-align:left;font-size:.83rem;border-left:3px solid var(--accent)}
+    .step strong{color:var(--accent)}
+
+    footer{position:relative;z-index:1;text-align:center;padding:1.8rem 2rem;
+      font-family:'DM Mono',monospace;font-size:.73rem;color:var(--muted);
+      border-top:1px solid var(--border)}
     footer a{color:var(--accent);text-decoration:none}
     footer a:hover{text-decoration:underline}
-    #scroll-top{position:fixed;bottom:2rem;right:2rem;width:40px;height:40px;background:var(--accent);border:none;border-radius:50%;color:#fff;font-size:1.1rem;cursor:pointer;display:none;align-items:center;justify-content:center;z-index:200;transition:transform .2s;box-shadow:0 4px 20px rgba(91,79,255,.4)}
+
+    #scroll-top{position:fixed;bottom:2rem;right:2rem;width:40px;height:40px;
+      background:var(--accent);border:none;border-radius:50%;color:#fff;font-size:1.1rem;
+      cursor:pointer;display:none;align-items:center;justify-content:center;
+      z-index:200;transition:transform .2s;box-shadow:0 4px 20px rgba(91,79,255,.4)}
     #scroll-top:hover{transform:translateY(-2px)}
-    @media(max-width:600px){header{padding:2rem 1rem 0}.controls{padding:1rem 1rem 1.2rem}#grid{grid-template-columns:repeat(auto-fill,minmax(155px,1fr));gap:.7rem}main{padding:0 1rem 3rem}#stats-bar{flex-direction:column;align-items:center;gap:.4rem}}
+
+    @media(max-width:600px){
+      header{padding:2rem 1rem 0}
+      .controls{padding:.9rem 1rem 1.1rem}
+      #grid{grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:.65rem}
+      main{padding:0 .9rem 3rem}
+      #stats-bar{gap:.75rem;font-size:.73rem}
+    }
   </style>
 </head>
 <body>
@@ -72,21 +141,26 @@
   <div class="orb orb-2"></div>
 
   <header>
-    <div class="logo">BunkrIndex</div>
-    <p class="tagline">The complete, searchable album directory</p>
+    <div class="logo">MediaIndex</div>
+    <p class="tagline">Fapello &amp; Bunkr — unified, searchable, always fresh</p>
     <div id="stats-bar">
-      <span><strong id="stat-total">—</strong> albums indexed</span>
+      <span><strong id="stat-total">—</strong> indexed</span>
+      <span><span class="source-pill pill-fapello">Fapello</span> <strong id="stat-fapello">—</strong></span>
+      <span><span class="source-pill pill-bunkr">Bunkr</span> <strong id="stat-bunkr">—</strong></span>
       <span>Updated <strong id="stat-updated">—</strong></span>
-      <span>+<strong id="stat-new">—</strong> last run</span>
     </div>
   </header>
 
   <div class="controls">
     <div class="search-wrap">
-      <svg class="search-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
-      <input id="search" type="search" placeholder='Search albums… (press "/" to focus)' autocomplete="off" spellcheck="false"/>
+      <svg class="search-icon" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+        <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
+      </svg>
+      <input id="search" type="search" placeholder='Search by name… (press "/" to focus)' autocomplete="off" spellcheck="false"/>
     </div>
+
     <div class="filter-row">
+      <!-- Sort -->
       <select id="sort">
         <option value="date-desc">Newest first</option>
         <option value="date-asc">Oldest first</option>
@@ -95,6 +169,16 @@
         <option value="title-asc">A → Z</option>
         <option value="title-desc">Z → A</option>
       </select>
+
+      <!-- Source filter -->
+      <button class="filter-btn active" data-source="all">All sources</button>
+      <button class="filter-btn" data-source="fapello">Fapello</button>
+      <button class="filter-btn" data-source="bunkr">Bunkr</button>
+
+      <!-- Videos filter -->
+      <button class="filter-btn" data-videos="yes">🎬 Has Videos</button>
+
+      <!-- File count filter -->
       <select id="filter-count">
         <option value="all">Any file count</option>
         <option value="1-9">1–9 files</option>
@@ -102,10 +186,8 @@
         <option value="50-199">50–199 files</option>
         <option value="200+">200+ files</option>
       </select>
-      <button class="filter-btn active" data-thumb="all">All</button>
-      <button class="filter-btn" data-thumb="thumb">Has thumbnail</button>
-      <button class="filter-btn" data-thumb="no-thumb">No thumbnail</button>
     </div>
+
     <div id="result-count"></div>
   </div>
 
@@ -115,189 +197,238 @@
     <div class="first-run" id="first-run">
       <div class="icon">🚀</div>
       <h2>Index not populated yet</h2>
-      <p>The scraper hasn't run or hasn't indexed any albums yet.</p>
+      <p>The scraper hasn't run yet. Trigger the first run:</p>
       <div class="step">1. Go to your repo → <strong>Actions</strong> tab</div>
-      <div class="step">2. Click <strong>"Scrape &amp; Index Albums"</strong></div>
-      <div class="step">3. Click <strong>"Run workflow"</strong> → <strong>"Run workflow"</strong></div>
-      <p style="margin-top:1rem;font-size:.8rem">Takes ~5–10 min. Albums appear here automatically after the run commits <code>albums.json</code>.</p>
+      <div class="step">2. Click <strong>Scrape &amp; Index Albums</strong></div>
+      <div class="step">3. Click <strong>Run workflow</strong></div>
+      <p style="margin-top:1rem;font-size:.8rem;color:var(--muted)">
+        Fapello results appear in ~2 min. Bunkr takes ~10 min (browser install).
+      </p>
     </div>
 
     <div id="grid" style="display:none"></div>
     <div id="empty">
-      <div class="empty-icon">🔍</div>
-      <p>No albums match your search.</p>
-      <p style="font-size:.8rem;margin-top:.4rem">Try different keywords or clear the filters.</p>
+      <div class="ei">🔍</div>
+      <p>No results match your filters.</p>
+      <p style="font-size:.8rem;margin-top:.35rem">Try a different search or clear some filters.</p>
     </div>
   </main>
 
   <footer>
-    Community-built index — not affiliated with Bunkr. &nbsp;<a href="feed.xml">RSS</a>
+    Community index — not affiliated with Fapello or Bunkr. &nbsp;<a href="feed.xml">RSS</a>
   </footer>
   <button id="scroll-top" title="Back to top">↑</button>
 
   <script>
   (() => {
     'use strict';
-    let allAlbums = [], lunrIdx = null, filtered = [];
-    const PAGE = 60;
-    let rendered = 0, busy = false;
+    let allAlbums=[], lunrIdx=null, filtered=[];
+    const PAGE=60;
+    let rendered=0, busy=false;
 
-    const $ = id => document.getElementById(id);
-    const grid    = $('grid'), loader = $('loader');
-    const emptyEl = $('empty'), firstRun = $('first-run');
-    const searchEl= $('search'), sortEl = $('sort'), cntEl = $('filter-count');
-    const tBtns   = document.querySelectorAll('[data-thumb]');
-    const rcEl    = $('result-count');
-    const stTotal = $('stat-total'), stUpdated = $('stat-updated'), stNew = $('stat-new');
-    const scrollBtn = $('scroll-top');
+    const $  = id => document.getElementById(id);
+    const grid=$('grid'), loader=$('loader'), emptyEl=$('empty'), firstRun=$('first-run');
+    const searchEl=$('search'), sortEl=$('sort'), cntEl=$('filter-count');
+    const srcBtns   = document.querySelectorAll('[data-source]');
+    const vidBtns   = document.querySelectorAll('[data-videos]');
+    const rcEl=$('result-count');
+    const stTotal=$('stat-total'), stUpdated=$('stat-updated');
+    const stFapello=$('stat-fapello'), stBunkr=$('stat-bunkr');
+    const scrollBtn=$('scroll-top');
 
     async function load() {
       try {
-        const r = await fetch('albums.json?v=' + Date.now());
-        if (!r.ok) throw new Error('HTTP ' + r.status);
+        const r = await fetch('albums.json?v='+Date.now());
+        if (!r.ok) throw new Error('HTTP '+r.status);
         const d = await r.json();
-        allAlbums = d.albums || [];
-        const m = d.meta || {};
-        stTotal.textContent   = (m.total || allAlbums.length).toLocaleString();
-        stNew.textContent     = (m.new_this_run || 0).toLocaleString();
+        allAlbums = d.albums||[];
+        const m = d.meta||{};
+        stTotal.textContent   = (m.total||allAlbums.length).toLocaleString();
+        stFapello.textContent = allAlbums.filter(a=>a.source==='fapello').length.toLocaleString();
+        stBunkr.textContent   = allAlbums.filter(a=>a.source==='bunkr').length.toLocaleString();
         if (m.last_updated) {
           const dt = new Date(m.last_updated);
           stUpdated.textContent = dt.toLocaleDateString('en-US',{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'});
         }
-        loader.style.display = 'none';
-        if (!allAlbums.length) { firstRun.style.display = 'block'; return; }
+        loader.style.display='none';
+        if (!allAlbums.length){ firstRun.style.display='block'; return; }
         buildIdx();
         filter();
       } catch(e) {
-        loader.innerHTML = `<p style="color:#ff4f8b">Failed to load albums.json: ${e.message}</p>`;
+        loader.innerHTML=`<p style="color:#ff4f8b">Failed to load: ${e.message}</p>`;
       }
     }
 
     function buildIdx() {
-      lunrIdx = lunr(function() {
+      lunrIdx = lunr(function(){
         this.ref('id');
-        this.field('title', {boost:10});
-        allAlbums.forEach(a => this.add({id: a.id, title: a.title || ''}));
+        this.field('title',{boost:10});
+        allAlbums.forEach(a=>this.add({id:a.id, title:a.title||''}));
       });
+    }
+
+    function getActive(btns) {
+      return document.querySelector(
+        '['+[...btns][0].getAttributeNames().find(n=>n.startsWith('data-'))+'].active'
+      ) || [...btns][0];
     }
 
     function countRange() {
-      const v = cntEl.value;
-      if (v === 'all') return null;
-      if (v === '200+') return [200, Infinity];
+      const v=cntEl.value;
+      if(v==='all') return null;
+      if(v==='200+') return [200,Infinity];
       return v.split('-').map(Number);
     }
 
-    function thumbFilter() {
-      return document.querySelector('[data-thumb].active')?.dataset.thumb || 'all';
-    }
-
     function filter() {
-      const q  = searchEl.value.trim();
-      const s  = sortEl.value;
-      const cr = countRange();
-      const tf = thumbFilter();
+      const q   = searchEl.value.trim();
+      const s   = sortEl.value;
+      const cr  = countRange();
+      const src = document.querySelector('[data-source].active')?.dataset.source || 'all';
+      const vid = document.querySelector('[data-videos].active')?.dataset.videos;
 
       let res = allAlbums;
 
-      if (q.length >= 2 && lunrIdx) {
+      // Search
+      if (q.length>=2 && lunrIdx) {
         try {
-          const hits = new Set(lunrIdx.search(q+'~1').map(h=>h.ref));
-          res = allAlbums.filter(a => hits.has(a.id));
-        } catch(_) {
-          const ql = q.toLowerCase();
-          res = allAlbums.filter(a => (a.title||'').toLowerCase().includes(ql));
+          const hits=new Set(lunrIdx.search(q+'~1').map(h=>h.ref));
+          res=allAlbums.filter(a=>hits.has(a.id));
+        } catch(_){
+          const ql=q.toLowerCase();
+          res=allAlbums.filter(a=>(a.title||'').toLowerCase().includes(ql));
         }
       }
-      if (cr) res = res.filter(a => { const f=a.file_count||0; return f>=cr[0]&&f<=cr[1]; });
-      if (tf === 'thumb')    res = res.filter(a=>a.thumbnail);
-      if (tf === 'no-thumb') res = res.filter(a=>!a.thumbnail);
 
-      res = [...res].sort((a,b) => {
-        if (s==='date-desc')  return cmpD(b,a);
-        if (s==='date-asc')   return cmpD(a,b);
-        if (s==='files-desc') return (b.file_count||0)-(a.file_count||0);
-        if (s==='files-asc')  return (a.file_count||0)-(b.file_count||0);
-        if (s==='title-asc')  return (a.title||'').localeCompare(b.title||'');
-        if (s==='title-desc') return (b.title||'').localeCompare(a.title||'');
+      // Source filter
+      if (src!=='all') res=res.filter(a=>a.source===src);
+
+      // Videos filter
+      if (vid==='yes') res=res.filter(a=>a.has_videos||a.video_count>0);
+
+      // File count filter
+      if (cr) res=res.filter(a=>{ const f=a.file_count||0; return f>=cr[0]&&f<=cr[1]; });
+
+      // Sort
+      res=[...res].sort((a,b)=>{
+        if(s==='date-desc')  return cmpD(b,a);
+        if(s==='date-asc')   return cmpD(a,b);
+        if(s==='files-desc') return (b.file_count||0)-(a.file_count||0);
+        if(s==='files-asc')  return (a.file_count||0)-(b.file_count||0);
+        if(s==='title-asc')  return (a.title||'').localeCompare(b.title||'');
+        if(s==='title-desc') return (b.title||'').localeCompare(a.title||'');
         return 0;
       });
 
-      filtered = res;
-      rendered = 0;
-      grid.innerHTML = '';
-      grid.style.display = 'grid';
-      emptyEl.style.display = 'none';
-
-      if (!filtered.length) { emptyEl.style.display='block'; rcEl.textContent=''; return; }
+      filtered=res; rendered=0;
+      grid.innerHTML='';
+      grid.style.display='grid';
+      emptyEl.style.display='none';
+      if(!filtered.length){ emptyEl.style.display='block'; rcEl.textContent=''; return; }
       batch();
     }
 
     function cmpD(a,b){return new Date(a.date||a.indexed_at||0)-new Date(b.date||b.indexed_at||0)}
 
     function batch() {
-      if (busy) return;
-      busy = true;
-      filtered.slice(rendered, rendered+PAGE).forEach((a,i) => grid.appendChild(card(a, rendered+i)));
-      rendered += Math.min(PAGE, filtered.length - rendered);
-      busy = false;
-      rcEl.textContent = rendered < filtered.length
-        ? `Showing ${rendered.toLocaleString()} of ${filtered.length.toLocaleString()} — scroll for more`
-        : `${filtered.length.toLocaleString()} albums`;
+      if(busy) return;
+      busy=true;
+      filtered.slice(rendered,rendered+PAGE).forEach((a,i)=>grid.appendChild(card(a,rendered+i)));
+      rendered+=Math.min(PAGE,filtered.length-rendered);
+      busy=false;
+      rcEl.textContent=rendered<filtered.length
+        ?`Showing ${rendered.toLocaleString()} of ${filtered.length.toLocaleString()} — scroll for more`
+        :`${filtered.length.toLocaleString()} results`;
     }
 
-    function card(a, i) {
-      const el = document.createElement('a');
-      el.className = 'card';
-      el.href = a.url || `https://bunkr.si/a/${a.id}`;
-      el.target = '_blank';
-      el.rel = 'noopener noreferrer';
-      el.style.animationDelay = Math.min(i % PAGE, 30) * 18 + 'ms';
+    function card(a,i) {
+      const el=document.createElement('a');
+      el.className='card';
+      el.href=a.url||'#';
+      el.target='_blank';
+      el.rel='noopener noreferrer';
+      el.style.animationDelay=Math.min(i%PAGE,28)*16+'ms';
+
+      const src   = a.source||'';
+      const isVid = a.has_videos||a.video_count>0;
+      const fc    = a.file_count||0;
+      const ph    = a.photo_count||0;
+      const vc    = a.video_count||0;
 
       const thumb = a.thumbnail
         ? `<img src="${x(a.thumbnail)}" alt="${x(a.title)}" loading="lazy" decoding="async"
              onerror="this.parentElement.innerHTML='<div class=thumb-placeholder>📁</div>'">`
-        : `<div class="thumb-placeholder">📁</div>`;
+        : `<div class="thumb-placeholder">${src==='fapello'?'👤':'📁'}</div>`;
 
-      const badge = a.file_count ? `<span class="card-badge">${a.file_count} files</span>` : '';
+      // Build badges
+      let badges='';
+      if (fc>0)   badges+=`<span class="badge">${fc} files</span>`;
+      if (isVid)  badges+=`<span class="badge badge-video">🎬 video</span>`;
+      if (src==='fapello') badges+=`<span class="badge badge-source-fapello">Fapello</span>`;
+      if (src==='bunkr')   badges+=`<span class="badge badge-source-bunkr">Bunkr</span>`;
 
       const date = a.date
         ? new Date(a.date).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'})
         : '';
 
-      el.innerHTML = `
-        <div class="card-thumb">${thumb}${badge}</div>
+      let meta='';
+      if (ph&&vc) meta=`${ph} photos · ${vc} videos`;
+      else if (ph) meta=`${ph} photos`;
+      else if (vc) meta=`${vc} videos`;
+      else if (fc) meta=`${fc} files`;
+      if (date) meta+=(meta?' · ':'')+date;
+
+      el.innerHTML=`
+        <div class="card-thumb">
+          ${thumb}
+          <div class="card-badges">${badges}</div>
+        </div>
         <div class="card-body">
           <div class="card-title">${x(a.title||a.id)}</div>
-          <div class="card-meta">${x(date)}${a.size ? ' · '+x(a.size) : ''}</div>
+          <div class="card-meta">${x(meta)}</div>
         </div>`;
       return el;
     }
 
-    function x(s){ return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+    function x(s){return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
 
     // Infinite scroll
-    const sentinel = document.createElement('div');
+    const sentinel=document.createElement('div');
     document.querySelector('footer').before(sentinel);
-    new IntersectionObserver(e => {
-      if (e[0].isIntersecting && rendered < filtered.length) batch();
-    }, {rootMargin:'400px'}).observe(sentinel);
+    new IntersectionObserver(e=>{
+      if(e[0].isIntersecting&&rendered<filtered.length) batch();
+    },{rootMargin:'400px'}).observe(sentinel);
 
     // Events
     let t;
-    const db = (fn,ms) => { clearTimeout(t); t=setTimeout(fn,ms); };
-    searchEl.addEventListener('input', ()=>db(filter,220));
-    sortEl.addEventListener('change', filter);
-    cntEl.addEventListener('change', filter);
-    tBtns.forEach(b=>b.addEventListener('click',()=>{
-      tBtns.forEach(x=>x.classList.remove('active'));
+    const db=(fn,ms)=>{clearTimeout(t);t=setTimeout(fn,ms)};
+    searchEl.addEventListener('input',()=>db(filter,200));
+    sortEl.addEventListener('change',filter);
+    cntEl.addEventListener('change',filter);
+
+    srcBtns.forEach(b=>b.addEventListener('click',()=>{
+      srcBtns.forEach(x=>{
+        x.classList.remove('active','active-fapello','active-bunkr');
+      });
       b.classList.add('active');
+      if(b.dataset.source==='fapello') b.classList.add('active-fapello');
+      if(b.dataset.source==='bunkr')   b.classList.add('active-bunkr');
       filter();
     }));
-    document.addEventListener('keydown', e=>{
-      if (e.key==='/' && document.activeElement!==searchEl){ e.preventDefault(); searchEl.focus(); }
+
+    vidBtns.forEach(b=>b.addEventListener('click',()=>{
+      const isOn=b.classList.contains('active');
+      vidBtns.forEach(x=>x.classList.remove('active','active-videos'));
+      if(!isOn){ b.classList.add('active','active-videos'); }
+      filter();
+    }));
+
+    document.addEventListener('keydown',e=>{
+      if(e.key==='/'&&document.activeElement!==searchEl){e.preventDefault();searchEl.focus();}
     });
-    window.addEventListener('scroll',()=>{ scrollBtn.style.display=window.scrollY>600?'flex':'none'; });
+    window.addEventListener('scroll',()=>{
+      scrollBtn.style.display=window.scrollY>600?'flex':'none';
+    });
     scrollBtn.addEventListener('click',()=>window.scrollTo({top:0,behavior:'smooth'}));
 
     load();
