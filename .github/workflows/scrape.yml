@@ -6,16 +6,11 @@ on:
   workflow_dispatch:
     inputs:
       max_models:
-        description: "Max records per source (default 1000)"
-        default: "1000"
+        description: "Max models per source"
+        default: "2000"
         required: false
-      enable_coomer:
-        description: "Enable Coomer.su"
-        default: "true"
-        type: choice
-        options: ["true", "false"]
       force_commit:
-        description: "Bypass commit guard (for debugging)"
+        description: "Bypass commit guard"
         default: "false"
         type: choice
         options: ["false", "true"]
@@ -33,6 +28,15 @@ jobs:
         with:
           fetch-depth: 1
 
+      # Use Google DNS — GitHub's default resolver can fail on .cr / .su / .st TLDs
+      - name: Configure DNS
+        run: |
+          echo "nameserver 8.8.8.8" | sudo tee /etc/resolv.conf
+          echo "nameserver 8.8.4.4" | sudo tee -a /etc/resolv.conf
+          # Verify resolution
+          nslookup kemono.cr 8.8.8.8 || echo "kemono.cr lookup failed"
+          nslookup coomer.st 8.8.8.8 || echo "coomer.st lookup failed"
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -43,15 +47,14 @@ jobs:
 
       - name: Run scraper
         env:
-          MAX_MODELS: ${{ github.event.inputs.max_models || '1000' }}
+          MAX_MODELS:     ${{ github.event.inputs.max_models || '2000' }}
           ENABLE_KEMONO:  "true"
-          ENABLE_COOMER:  ${{ github.event.inputs.enable_coomer || 'true' }}
+          ENABLE_COOMER:  "true"
           ENABLE_EPORNER: "true"
           FORCE_COMMIT:   ${{ github.event.inputs.force_commit || 'false' }}
           DELAY:          "1.5"
         run: python scraper.py
 
-      # Always upload so you can inspect what ran
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         if: always()
@@ -66,11 +69,9 @@ jobs:
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-
-          TOTAL=$(python -c "import json; d=json.load(open('validation.json')); print(d.get('total',0))" 2>/dev/null || echo 0)
-          NEW=$(python   -c "import json; d=json.load(open('validation.json')); print(d.get('new_this_run',0))" 2>/dev/null || echo 0)
-
+          TOTAL=$(python -c "import json; print(json.load(open('validation.json')).get('total',0))" 2>/dev/null || echo 0)
+          NEW=$(python   -c "import json; print(json.load(open('validation.json')).get('new_this_run',0))" 2>/dev/null || echo 0)
           git add albums.json validation.json
-          git diff --staged --quiet && echo "No changes to commit." && exit 0
+          git diff --staged --quiet && echo "No changes." && exit 0
           git commit -m "index: ${TOTAL} records (+${NEW} new) [skip ci]"
           git push
