@@ -182,58 +182,47 @@ def scrape_eporner_models(max_models: int) -> List[Dict[str, Any]]:
     return records
 
 # -------------------- Kemono / Coomer (bulk JSON) --------------------
-def scrape_kemono_creators(base_url: str, source_name: str, max_creators: int) -> List[Dict[str, Any]]:
-    log.info(f"[{source_name}] Fetching creators list from {base_url}")
-    url = f"{base_url}/api/v1/creators.txt"
-    data = fetch_json(url)
-    if not data:
-        log.error(f"[{source_name}] Failed to fetch creators.txt — got no data")
-        return []
-    if not isinstance(data, list):
-        log.error(f"[{source_name}] Unexpected response type: {type(data)}")
-        return []
-    records: List[Dict[str, Any]] = []
-    seen = set()
-    for creator in data[:max_creators]:
-        try:
-            cid = str(creator.get("id", ""))
-            name = (creator.get("name") or "").strip()
-            svc = str(creator.get("service") or "")
-            indexed = creator.get("indexed")
-            updated = creator.get("updated")
-            if is_placeholder(name) or not cid:
-                continue
-            rid = f"{source_name}:{svc}:{cid}"
-            if rid in seen:
-                continue
-            seen.add(rid)
-            date_str = None
-            for raw in (updated, indexed):
-                if raw:
-                    try:
-                        dt = datetime.fromisoformat(str(raw).replace(" ", "T"))
-                        if dt.tzinfo is None:
-                            dt = dt.replace(tzinfo=timezone.utc)
-                        date_str = dt.isoformat()
-                        break
-                    except Exception:
-                        pass
-            records.append({
-                "id": rid,
-                "title": name,
-                "source": source_name,
-                "service": svc,
-                "url": f"{base_url}/{svc}/user/{cid}",
-                "file_count": 0,
-                "has_videos": False,
-                "date": date_str,
-                "indexed_at": now_iso(),
-            })
-        except Exception as e:
-            log.warning(f"[{source_name}] Parse error: {e}")
-    log.info(f"[{source_name}] Done: {len(records)} creators")
-    return records
+def scrape_kemono_creators(base_url: str, source: str, max_models: int):
+    """
+    Uses public .su endpoints instead of api.kemono.party / api.coomer.party
+    This avoids GitHub Actions DNS failures.
+    """
 
+    if source == "kemono":
+        base = "https://kemono.su"
+    else:
+        base = "https://coomer.su"
+
+    log.info(f"[{source}] Fetching creators list from {base}")
+
+    data = fetch_json(f"{base}/api/v1/creators")
+
+    if not data:
+        log.error(f"[{source}] Failed to fetch creators — got no data")
+        return
+
+    count = 0
+
+    for creator in data:
+        if count >= max_models:
+            break
+
+        service = creator.get("service")
+        cid = creator.get("id")
+        name = creator.get("name")
+
+        if not service or not cid or not name:
+            continue
+
+        yield {
+            "name": name,
+            "url": f"{base}/{service}/user/{cid}",
+            "source": source
+        }
+
+        count += 1
+
+    log.info(f"[{source}] Done: {count} creators")
 # -------------------- Main orchestration --------------------
 def main():
     log.info("=" * 60)
