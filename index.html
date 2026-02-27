@@ -433,7 +433,9 @@ function render() {
     const src  = escHtml(a.source || "");
     const title = escHtml(a.title || a.id || "—");
     const url   = escHtml(a.url || "#");
-    const count = fmtCount(a.file_count);
+    const vidCount = a.video_count ? fmtCount(a.video_count) + " vid" : "";
+    const picCount = a.photo_count ? fmtCount(a.photo_count) + " pic" : "";
+    const count = (vidCount && picCount) ? vidCount + " / " + picCount : fmtCount(a.file_count) || "—";
     const type  = a.has_videos ? '<span class="video-badge">▶ Video</span>' : '<span style="color:var(--muted);font-size:12px">Photo</span>';
     const date  = fmtDate(a.date || a.indexed_at);
 

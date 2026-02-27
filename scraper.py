@@ -3,15 +3,14 @@
 MediaIndex scraper
 
 Sources:
-  1. Eporner   — official JSON API /api/v2/video/search/ with pornstar query
-                 (HTML selector broke; API is stable and confirmed working)
-  2. Kemono.cr — per-service API with cloudscraper fallback (plain requests = 403)
+  1. Eporner — pornstar profiles from /pornstar-list/ using cloudscraper
+               (page has JS age gate; plain requests gets blocked, cloudscraper bypasses it)
+               One record per performer: name + video count + photo count + profile URL
+  2. Kemono.cr — per-service API (403 on CI, kept for when proxy/self-hosted added)
   3. Coomer.st — same
 
-Kemono/Coomer status:
-  - All per-service API endpoints return 403 on GitHub Actions IPs
-  - cloudscraper handles CF JS challenges and some WAF blocks
-  - If still 403 after cloudscraper → logged and skipped (don't block the run)
+Kemono/Coomer status: hard 403 on all GitHub Actions IPs even with cloudscraper.
+Fix requires self-hosted runner or proxy — kept in code, just won't produce records yet.
 """
 from __future__ import annotations
 import json, logging, os, re, sys, time, random
@@ -20,6 +19,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import requests
+from bs4 import BeautifulSoup
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S")
 log = logging.getLogger("scraper")
@@ -31,7 +31,7 @@ DEBUG_DIR    = HERE / "debug"
 DEBUG_DIR.mkdir(exist_ok=True)
 
 MAX_MODELS    = int(os.getenv("MAX_MODELS",   "5000"))
-DELAY         = float(os.getenv("DELAY",      "1.0"))
+DELAY         = float(os.getenv("DELAY",      "1.5"))
 FORCE_COMMIT  = os.getenv("FORCE_COMMIT",  "false").lower() == "true"
 ENABLE_KEMONO  = os.getenv("ENABLE_KEMONO",  "true").lower() != "false"
 ENABLE_COOMER  = os.getenv("ENABLE_COOMER",  "true").lower() != "false"
@@ -48,21 +48,19 @@ def now_iso() -> str:
 
 def save_debug(name: str, content: bytes) -> None:
     try:
-        (DEBUG_DIR / name).write_bytes(content)
+        (DEBUG_DIR / name).write_bytes(content[:50000])  # cap at 50KB
     except Exception:
         pass
 
-# ── HTTP — plain requests + cloudscraper fallback ──────────────────────────────
+# ── HTTP ───────────────────────────────────────────────────────────────────────
 _HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122.0 Safari/537.36",
     "Accept-Language": "en-US,en;q=0.9",
-    "Accept": "application/json, text/html, */*",
 }
 
 _sess = requests.Session()
 _sess.headers.update(_HEADERS)
 
-# Try to import cloudscraper once
 try:
     import cloudscraper as _cs_mod
     _cs = _cs_mod.create_scraper(browser={"browser":"chrome","platform":"windows","mobile":False})
@@ -71,12 +69,50 @@ try:
     log.info("cloudscraper available ✓")
 except ImportError:
     HAS_CLOUDSCRAPER = False
-    log.warning("cloudscraper not installed — install it: pip install cloudscraper")
+    log.warning("cloudscraper not installed — eporner pornstar list will fail without it")
+
+def fetch_html(url: str, use_cs: bool = False) -> Optional[str]:
+    """Fetch HTML. use_cs=True forces cloudscraper (for age-gated/CF pages)."""
+    client = (_cs if use_cs and HAS_CLOUDSCRAPER else _sess)
+    for attempt in range(1, 4):
+        time.sleep(DELAY + random.uniform(0, 0.5))
+        try:
+            r = client.get(url, timeout=30)
+            if r.status_code == 200:
+                text = r.text
+                # Detect age gate / CF block
+                low = text.lower()
+                if ("want to watch free porn" in low or
+                    "age verification" in low or
+                    "checking your browser" in low or
+                    len(text) < 2000):
+                    log.warning(f"Age gate / CF block on {url} (len={len(text)})")
+                    save_debug(f"blocked_{url.replace('/','_')[-60:]}.html", r.content)
+                    # If we weren't using cloudscraper, retry with it
+                    if not use_cs and HAS_CLOUDSCRAPER:
+                        log.info("Retrying with cloudscraper...")
+                        return fetch_html(url, use_cs=True)
+                    return None
+                return text
+            elif r.status_code == 429:
+                log.warning("429 rate-limit, sleeping 60s"); time.sleep(60)
+            elif r.status_code == 403:
+                log.warning(f"403 on {url}")
+                save_debug(f"403_{url.replace('/','_')[-60:]}.html", r.content)
+                if not use_cs and HAS_CLOUDSCRAPER:
+                    return fetch_html(url, use_cs=True)
+                return None
+            else:
+                log.warning(f"HTTP {r.status_code}: {url}")
+        except Exception as e:
+            log.warning(f"fetch_html attempt {attempt}: {e}")
+        time.sleep(2 ** attempt)
+    return None
 
 def fetch_json(url: str, referer: str = "") -> Optional[Any]:
-    """Try requests → cloudscraper fallback. Returns parsed JSON or None."""
-    hdrs = {"Referer": referer, "Origin": referer.rstrip("/")} if referer else {}
-
+    """Fetch JSON. Plain requests first, cloudscraper fallback on 403."""
+    hdrs = {"Accept": "application/json",
+            "Referer": referer, "Origin": referer.rstrip("/")} if referer else {"Accept": "application/json"}
     for attempt in range(1, 4):
         time.sleep(DELAY + random.uniform(0, 0.3))
         try:
@@ -84,31 +120,27 @@ def fetch_json(url: str, referer: str = "") -> Optional[Any]:
             if r.status_code == 200:
                 return r.json()
             elif r.status_code == 429:
-                log.warning(f"429 rate-limit, sleeping 60s"); time.sleep(60); continue
+                log.warning("429, sleeping 60s"); time.sleep(60)
             elif r.status_code == 403:
                 log.warning(f"403 on {url} — trying cloudscraper")
-                save_debug(f"403_{url.replace('/','_')[:80]}.html", r.content)
-                break  # fall through to cloudscraper
+                save_debug(f"403_{url.replace('/','_')[-60:]}.html", r.content)
+                break
             else:
                 log.warning(f"HTTP {r.status_code}: {url}")
         except Exception as e:
             log.warning(f"fetch_json attempt {attempt}: {e}")
         time.sleep(2 ** attempt)
 
-    # Cloudscraper fallback
     if HAS_CLOUDSCRAPER:
         try:
-            time.sleep(DELAY + random.uniform(0.5, 1.5))
+            time.sleep(DELAY)
             r2 = _cs.get(url, headers=hdrs, timeout=30)
             if r2.status_code == 200:
-                log.info(f"cloudscraper succeeded for {url}")
                 return r2.json()
-            else:
-                log.warning(f"cloudscraper also got {r2.status_code} for {url}")
-                save_debug(f"cs_{r2.status_code}_{url.replace('/','_')[:80]}.html", r2.content)
+            log.warning(f"cloudscraper got {r2.status_code} for {url}")
+            save_debug(f"cs_{r2.status_code}_{url.replace('/','_')[-60:]}.html", r2.content)
         except Exception as e:
             log.warning(f"cloudscraper error: {e}")
-
     return None
 
 # ── Persistence ────────────────────────────────────────────────────────────────
@@ -134,81 +166,105 @@ def save(albums: Dict[str, Any], new_count: int) -> dict:
     return meta
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Eporner — official JSON API (stable, no HTML parsing needed)
-# GET /api/v2/video/search/?query=all&order=latest&per_page=100&page=N&format=json
-# Each video has: id, title, url, added, length_min, views, default_thumb
-# We index unique pornstar names by parsing the title keywords field,
-# but simpler: just index by pornstar search pages via the search API
+# Eporner — pornstar profile pages
+# Uses cloudscraper to bypass the JS age gate on /pornstar-list/
+#
+# URL pattern: /pornstar-list/?sort=most-popular&page=N
+# Card structure (from nav menu confirms): /pornstar/{name}-{5charID}/
+# Each card shows: performer name, video count, photo count
 # ══════════════════════════════════════════════════════════════════════════════
 def scrape_eporner(max_models: int) -> List[dict]:
-    """
-    Use eporner search API to get videos, deduplicate by extracting
-    performer names from keywords. Fallback: index videos directly if no
-    performer extraction possible — at minimum we get real content.
-    
-    API: /api/v2/video/search/?query=all&order=latest&per_page=100&page=N&format=json
-    """
-    records: Dict[str, dict] = {}
-    page = 1
-    total_pages = None
-    log.info(f"[eporner] Using JSON API (target: {max_models})")
+    if not HAS_CLOUDSCRAPER:
+        log.error("[eporner] cloudscraper required for pornstar list — skipping")
+        return []
+
+    records, seen, page = [], set(), 1
+    log.info(f"[eporner] Scraping pornstar list via cloudscraper (target: {max_models})")
 
     while len(records) < max_models:
-        url = (f"https://www.eporner.com/api/v2/video/search/"
-               f"?query=all&per_page=100&page={page}&order=most-popular&format=json&thumbsize=medium")
-        data = fetch_json(url)
+        url  = f"https://www.eporner.com/pornstar-list/?sort=most-popular&page={page}"
+        html = fetch_html(url, use_cs=True)
 
-        if not data or not isinstance(data, dict):
-            log.warning(f"[eporner] No data on page {page}, stopping"); break
-
-        if total_pages is None:
-            total_pages = data.get("total_pages", 1)
-            log.info(f"[eporner] {data.get('total_count','?')} total videos across {total_pages} pages")
-
-        videos = data.get("videos") or []
-        if not videos:
+        if not html:
+            log.warning(f"[eporner] No HTML on page {page}, stopping")
             break
 
-        for v in videos:
-            vid   = v.get("id","")
-            title = (v.get("title") or "").strip()
-            if not vid or is_placeholder(title):
+        soup = BeautifulSoup(html, "lxml")
+
+        # Save first page for debugging so we can see the actual structure
+        if page == 1:
+            save_debug("eporner_page1.html", html.encode())
+
+        # Pornstar card links: href="/pornstar/{slug}-{5charID}/"
+        cards = soup.find_all("a", href=re.compile(r"^/pornstar/[^/]+-\w{5}/?$"))
+
+        if not cards:
+            # Try broader search in case selector is off
+            cards = soup.select("a[href*='/pornstar/']")
+            cards = [c for c in cards if re.search(r"/pornstar/[^/]+-\w{5}/?$", c.get("href",""))]
+
+        if not cards:
+            log.warning(f"[eporner] No pornstar cards on page {page} — check debug/eporner_page1.html")
+            break
+
+        new_here = 0
+        for card in cards:
+            href = card.get("href", "")
+            m = re.search(r"/pornstar/(.+?)-(\w{5})/?$", href)
+            if not m:
                 continue
 
-            rid = f"eporner:{vid}"
-            if rid in records:
+            slug, ps_id = m.group(1), m.group(2)
+            rid = f"eporner:ps:{ps_id}"
+            if rid in seen:
+                continue
+            seen.add(rid)
+
+            # Name: prefer explicit name tag, fall back to slug
+            name_tag = (card.find(class_=re.compile(r"name", re.I)) or
+                        card.find(["h3", "h2", "strong"]) or
+                        card.find("p"))
+            name = name_tag.get_text(strip=True) if name_tag else slug.replace("-", " ").title()
+
+            if is_placeholder(name):
                 continue
 
-            date_str = None
-            added = v.get("added")
-            if added:
-                try:
-                    dt = datetime.strptime(added, "%Y-%m-%d %H:%M:%S")
-                    date_str = dt.replace(tzinfo=timezone.utc).isoformat()
-                except Exception: pass
+            # File counts: look for "NNN Videos" and "NNN Photos" in card text
+            card_text = card.get_text(" ", strip=True)
+            vid_match = re.search(r"([\d,]+)\s*Videos?", card_text, re.I)
+            pic_match = re.search(r"([\d,]+)\s*Photos?", card_text, re.I)
+            video_count = int(vid_match.group(1).replace(",","")) if vid_match else 0
+            photo_count = int(pic_match.group(1).replace(",","")) if pic_match else 0
+            total_files = video_count + photo_count
 
-            records[rid] = {
-                "id": rid, "title": title, "source": "eporner",
-                "url": v.get("url") or f"https://www.eporner.com/hd-porn/{vid}/",
-                "file_count": 1, "has_videos": True,
-                "views": v.get("views", 0),
-                "date": date_str, "indexed_at": now_iso(),
-            }
-
+            records.append({
+                "id":          rid,
+                "title":       name,
+                "source":      "eporner",
+                "url":         f"https://www.eporner.com/pornstar/{slug}-{ps_id}/",
+                "file_count":  total_files,
+                "video_count": video_count,
+                "photo_count": photo_count,
+                "has_videos":  video_count > 0,
+                "date":        None,
+                "indexed_at":  now_iso(),
+            })
+            new_here += 1
             if len(records) >= max_models:
                 break
 
-        log.info(f"[eporner] page {page}/{total_pages}: {len(records)} total")
-        if page >= (total_pages or 1):
+        log.info(f"[eporner] page {page}: {new_here} new performers ({len(records)} total)")
+        if new_here == 0:
             break
         page += 1
 
-    result = list(records.values())
-    log.info(f"[eporner] Done: {len(result)} videos")
-    return result
+    log.info(f"[eporner] Done: {len(records)} performers")
+    return records
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Kemono / Coomer — per-service creator API + cloudscraper fallback
+# Kemono / Coomer — per-service API + cloudscraper fallback
+# Currently hard-403'd on GitHub Actions IPs.
+# Keeping the code — will work when self-hosted runner or proxy is added.
 # ══════════════════════════════════════════════════════════════════════════════
 KEMONO_SERVICES = ["patreon","fanbox","gumroad","subscribestar","dlsite","fantia","boosty","afdian"]
 COOMER_SERVICES = ["onlyfans","fansly","candfans"]
@@ -216,13 +272,12 @@ COOMER_SERVICES = ["onlyfans","fansly","candfans"]
 def scrape_creators_by_service(base_url: str, source: str,
                                 services: List[str], max_total: int) -> List[dict]:
     all_records: Dict[str, dict] = {}
-    log.info(f"[{source}] Fetching creators via per-service API + cloudscraper fallback")
+    log.info(f"[{source}] Fetching creators via per-service API")
 
     for svc in services:
         if len(all_records) >= max_total:
             break
-        offset = 0
-        svc_count = 0
+        offset, svc_count = 0, 0
         log.info(f"[{source}] service={svc}")
 
         while len(all_records) < max_total:
@@ -230,10 +285,9 @@ def scrape_creators_by_service(base_url: str, source: str,
             data = fetch_json(url, referer=f"{base_url}/")
 
             if data is None:
-                log.warning(f"[{source}] {svc} blocked after all attempts, skipping")
+                log.warning(f"[{source}] {svc} blocked — skipping service")
                 break
-
-            if not isinstance(data, list) or len(data) == 0:
+            if not isinstance(data, list) or not data:
                 break
 
             for c in data:
@@ -244,7 +298,6 @@ def scrape_creators_by_service(base_url: str, source: str,
                 rid = f"{source}:{svc}:{cid}"
                 if rid in all_records:
                     continue
-
                 date_str = None
                 for raw in [c.get("updated"), c.get("indexed")]:
                     if raw:
@@ -253,7 +306,6 @@ def scrape_creators_by_service(base_url: str, source: str,
                             date_str = (dt.replace(tzinfo=timezone.utc) if not dt.tzinfo else dt).isoformat()
                             break
                         except Exception: pass
-
                 all_records[rid] = {
                     "id": rid, "title": name, "source": source, "service": svc,
                     "url": f"{base_url}/{svc}/user/{cid}",
