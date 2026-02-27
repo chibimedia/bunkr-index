@@ -3,11 +3,12 @@
 MediaIndex scraper
 
 Sources:
-  1. Eporner   — /pornstar-list/?sort=most-popular scrape (model name + video count)
-  2. Kemono.cr — /api/v1/creators.txt  (bulk JSON, single request)
-  3. Coomer.st — /api/v1/creators.txt  (same API)
+  1. Eporner   — /pornstar-list/?sort=most-popular (HTML scrape, model name + video count)
+  2. Kemono.cr — /artists page (HTML scrape, bypasses 403 on API)
+  3. Coomer.st — /artists page (HTML scrape, same structure)
 
-Domains as of 2025-07: kemono.su → kemono.cr | coomer.su → coomer.st
+Kemono/Coomer API /creators.txt → 403 on CI IPs (sitewide block as of 2025-08).
+HTML artist listing pages work fine without auth.
 """
 from __future__ import annotations
 import json, logging, os, re, sys, time, random
@@ -47,22 +48,6 @@ _sess.headers.update({
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122.0 Safari/537.36",
     "Accept-Language": "en-US,en;q=0.9",
 })
-
-def get_json(url: str) -> Optional[Any]:
-    for attempt in range(1, 4):
-        time.sleep(DELAY + random.uniform(0, 0.5))
-        try:
-            r = _sess.get(url, timeout=30, headers={"Accept": "application/json"})
-            if r.status_code == 200:
-                return r.json()
-            elif r.status_code == 429:
-                log.warning("429 — sleeping 45s"); time.sleep(45)
-            else:
-                log.warning(f"HTTP {r.status_code}: {url}")
-        except Exception as e:
-            log.warning(f"get_json attempt {attempt}: {e}")
-        time.sleep(2 ** attempt)
-    return None
 
 def get_html(url: str) -> Optional[str]:
     for attempt in range(1, 4):
@@ -146,45 +131,105 @@ def scrape_eporner(max_models: int) -> List[dict]:
     return records
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Kemono / Coomer — bulk creators endpoint
+# Kemono / Coomer — HTML artist listing (API /creators.txt returns 403)
 # ══════════════════════════════════════════════════════════════════════════════
-def scrape_creators(base_url: str, source: str, max_models: int) -> List[dict]:
+def scrape_kemono_html(base_url: str, source: str, max_models: int) -> List[dict]:
     """
-    GET {base_url}/api/v1/creators.txt
-    Single request, returns all creators as JSON array.
-    kemono.su → kemono.cr (changed July 2025)
-    coomer.su → coomer.st (changed July 2025)
+    Scrape the /artists page which lists all creators with name, service, and post count.
+    Uses ?o=N offset pagination (25 per page).
+
+    Card structure (both kemono.cr and coomer.st):
+      <article class="card">
+        <a href="/{service}/user/{id}">
+          <div class="user-card__name">{name}</div>
+          <div class="user-card__service">{service}</div>
+          (optional) <div class="user-card__count">{N} posts</div>
+        </a>
+      </article>
     """
-    url = f"{base_url}/api/v1/creators.txt"
-    log.info(f"[{source}] Fetching {url}")
-    data = get_json(url)
-    if not data or not isinstance(data, list):
-        log.error(f"[{source}] No data from {url} — got {type(data)}")
-        return []
-    log.info(f"[{source}] {len(data)} creators returned")
     records, seen = [], set()
-    for c in data[:max_models]:
-        cid  = str(c.get("id",""))
-        name = (c.get("name") or "").strip()
-        svc  = str(c.get("service",""))
-        if is_placeholder(name) or not cid: continue
-        rid = f"{source}:{svc}:{cid}"
-        if rid in seen: continue
-        seen.add(rid)
-        date_str = None
-        for raw in [c.get("updated"), c.get("indexed")]:
-            if raw:
-                try:
-                    dt = datetime.fromisoformat(str(raw).replace(" ","T"))
-                    date_str = (dt.replace(tzinfo=timezone.utc) if not dt.tzinfo else dt).isoformat()
-                    break
-                except Exception: pass
-        records.append({
-            "id": rid, "title": name, "source": source, "service": svc,
-            "url": f"{base_url}/{svc}/user/{cid}",
-            "file_count": 0, "has_videos": False,
-            "date": date_str, "indexed_at": now_iso(),
-        })
+    offset = 0
+    PER_PAGE = 25
+    consecutive_empty = 0
+
+    log.info(f"[{source}] Scraping {base_url}/artists (HTML, bypasses API 403)")
+
+    while len(records) < max_models:
+        url  = f"{base_url}/artists?o={offset}"
+        html = get_html(url)
+
+        if not html:
+            log.warning(f"[{source}] No HTML at offset {offset}, stopping")
+            break
+
+        soup  = BeautifulSoup(html, "html.parser")
+
+        # Try card-based layout first, fall back to any creator link
+        cards = soup.find_all("article", class_=re.compile(r"card"))
+        if not cards:
+            # Fallback: find all creator links directly
+            cards = soup.find_all("a", href=re.compile(r"^/(patreon|fanbox|onlyfans|fansly|subscribestar|gumroad|discord)/user/"))
+
+        if not cards:
+            log.info(f"[{source}] No cards at offset {offset}")
+            consecutive_empty += 1
+            if consecutive_empty >= 3:
+                log.info(f"[{source}] 3 empty pages, done")
+                break
+            offset += PER_PAGE
+            continue
+
+        consecutive_empty = 0
+        new_here = 0
+
+        for card in cards:
+            # Get the creator link
+            link = card if card.name == "a" else card.find("a", href=True)
+            if not link: continue
+
+            href = link.get("href", "")
+            # Match /{service}/user/{id}
+            m = re.match(r"^/([^/]+)/user/([^/?#]+)", href)
+            if not m: continue
+
+            svc = m.group(1)
+            cid = m.group(2)
+            rid = f"{source}:{svc}:{cid}"
+            if rid in seen: continue
+            seen.add(rid)
+
+            # Extract name
+            name_tag = (link.find(class_=re.compile(r"name")) or
+                        link.find(["h3","h2","strong","span"]))
+            if name_tag:
+                name = name_tag.get_text(strip=True)
+            else:
+                name = link.get_text(strip=True).split("\n")[0].strip()
+
+            if is_placeholder(name): continue
+
+            # Post count
+            count_tag = link.find(class_=re.compile(r"count|posts"))
+            post_count = 0
+            if count_tag:
+                cm = re.search(r"([\d,]+)", count_tag.get_text())
+                if cm: post_count = int(cm.group(1).replace(",",""))
+
+            records.append({
+                "id": rid, "title": name, "source": source, "service": svc,
+                "url": f"{base_url}{href}",
+                "file_count": post_count, "has_videos": False,
+                "date": None, "indexed_at": now_iso(),
+            })
+            new_here += 1
+            if len(records) >= max_models: break
+
+        log.info(f"[{source}] offset={offset}: {new_here} new ({len(records)} total)")
+        if new_here == 0:
+            consecutive_empty += 1
+            if consecutive_empty >= 3: break
+        offset += PER_PAGE
+
     log.info(f"[{source}] Done: {len(records)} creators")
     return records
 
@@ -203,14 +248,12 @@ def main():
                 albums[rec["id"]] = rec; new_count += 1
 
     if ENABLE_KEMONO:
-        # kemono.su → kemono.cr (July 2025 domain change)
-        for rec in scrape_creators("https://kemono.cr", "kemono", MAX_MODELS):
+        for rec in scrape_kemono_html("https://kemono.cr", "kemono", MAX_MODELS):
             if rec["id"] not in albums:
                 albums[rec["id"]] = rec; new_count += 1
 
     if ENABLE_COOMER:
-        # coomer.su → coomer.st (July 2025 domain change)
-        for rec in scrape_creators("https://coomer.st", "coomer", MAX_MODELS):
+        for rec in scrape_kemono_html("https://coomer.st", "coomer", MAX_MODELS):
             if rec["id"] not in albums:
                 albums[rec["id"]] = rec; new_count += 1
 
