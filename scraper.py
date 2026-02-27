@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
-MediaIndex scraper — clean, no raw IP tricks, no dead domains.
+MediaIndex scraper
 
 Sources:
   1. Eporner   — /pornstar-list/?sort=most-popular scrape (model name + video count)
-  2. Kemono.su — /api/v1/creators.txt  (bulk JSON, one request)
-  3. Coomer.su — /api/v1/creators.txt  (same API)
+  2. Kemono.cr — /api/v1/creators.txt  (bulk JSON, single request)
+  3. Coomer.st — /api/v1/creators.txt  (same API)
+
+Domains as of 2025-07: kemono.su → kemono.cr | coomer.su → coomer.st
 """
 from __future__ import annotations
 import json, logging, os, re, sys, time, random
@@ -19,12 +21,12 @@ from bs4 import BeautifulSoup
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S")
 log = logging.getLogger("scraper")
 
-HERE          = Path(__file__).parent.resolve()
-OUT_FILE      = HERE / "albums.json"
-VALIDATION    = HERE / "validation.json"
+HERE         = Path(__file__).parent.resolve()
+OUT_FILE     = HERE / "albums.json"
+VALIDATION   = HERE / "validation.json"
 
-MAX_MODELS    = int(os.getenv("MAX_MODELS",    "2000"))
-DELAY         = float(os.getenv("DELAY",       "1.5"))
+MAX_MODELS    = int(os.getenv("MAX_MODELS",   "2000"))
+DELAY         = float(os.getenv("DELAY",      "1.5"))
 FORCE_COMMIT  = os.getenv("FORCE_COMMIT",  "false").lower() == "true"
 ENABLE_KEMONO  = os.getenv("ENABLE_KEMONO",  "true").lower() != "false"
 ENABLE_COOMER  = os.getenv("ENABLE_COOMER",  "true").lower() != "false"
@@ -39,7 +41,7 @@ def is_placeholder(t: str) -> bool:
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
-# ── HTTP — always use hostname, never raw IPs ──────────────────────────────
+# ── HTTP ───────────────────────────────────────────────────────────────────────
 _sess = requests.Session()
 _sess.headers.update({
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122.0 Safari/537.36",
@@ -54,7 +56,7 @@ def get_json(url: str) -> Optional[Any]:
             if r.status_code == 200:
                 return r.json()
             elif r.status_code == 429:
-                log.warning(f"429 — sleeping 45s"); time.sleep(45)
+                log.warning("429 — sleeping 45s"); time.sleep(45)
             else:
                 log.warning(f"HTTP {r.status_code}: {url}")
         except Exception as e:
@@ -72,7 +74,7 @@ def get_html(url: str) -> Optional[str]:
                     log.warning(f"CF block on {url}"); return None
                 return r.text
             elif r.status_code == 429:
-                log.warning(f"429 — sleeping 45s"); time.sleep(45)
+                log.warning("429 — sleeping 45s"); time.sleep(45)
             else:
                 log.warning(f"HTTP {r.status_code}: {url}")
         except Exception as e:
@@ -80,7 +82,7 @@ def get_html(url: str) -> Optional[str]:
         time.sleep(2 ** attempt)
     return None
 
-# ── Persistence ────────────────────────────────────────────────────────────
+# ── Persistence ────────────────────────────────────────────────────────────────
 def load_existing() -> Dict[str, Any]:
     if OUT_FILE.exists():
         try:
@@ -102,9 +104,9 @@ def save(albums: Dict[str, Any], new_count: int) -> dict:
     log.info(f"✓ {len(rows)} total | {new_count} new | {ph} placeholders")
     return meta
 
-# ══════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
 # Eporner — pornstar profile pages
-# ══════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
 def scrape_eporner(max_models: int) -> List[dict]:
     records, seen, page = [], set(), 1
     log.info(f"[eporner] Scraping pornstar list (target: {max_models})")
@@ -143,20 +145,21 @@ def scrape_eporner(max_models: int) -> List[dict]:
     log.info(f"[eporner] Done: {len(records)} models")
     return records
 
-# ══════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
 # Kemono / Coomer — bulk creators endpoint
-# ══════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
 def scrape_creators(base_url: str, source: str, max_models: int) -> List[dict]:
     """
     GET {base_url}/api/v1/creators.txt
-    Returns JSON array: [{id, name, service, indexed, updated, public_id}]
-    Single request, no pagination, no CF issues.
-    base_url examples: https://kemono.su  https://coomer.su
+    Single request, returns all creators as JSON array.
+    kemono.su → kemono.cr (changed July 2025)
+    coomer.su → coomer.st (changed July 2025)
     """
-    log.info(f"[{source}] Fetching {base_url}/api/v1/creators.txt")
-    data = get_json(f"{base_url}/api/v1/creators.txt")
+    url = f"{base_url}/api/v1/creators.txt"
+    log.info(f"[{source}] Fetching {url}")
+    data = get_json(url)
     if not data or not isinstance(data, list):
-        log.error(f"[{source}] No data — got {type(data)}. Check if endpoint is up.")
+        log.error(f"[{source}] No data from {url} — got {type(data)}")
         return []
     log.info(f"[{source}] {len(data)} creators returned")
     records, seen = [], set()
@@ -173,7 +176,7 @@ def scrape_creators(base_url: str, source: str, max_models: int) -> List[dict]:
             if raw:
                 try:
                     dt = datetime.fromisoformat(str(raw).replace(" ","T"))
-                    date_str = dt.replace(tzinfo=timezone.utc).isoformat() if not dt.tzinfo else dt.isoformat()
+                    date_str = (dt.replace(tzinfo=timezone.utc) if not dt.tzinfo else dt).isoformat()
                     break
                 except Exception: pass
         records.append({
@@ -185,12 +188,12 @@ def scrape_creators(base_url: str, source: str, max_models: int) -> List[dict]:
     log.info(f"[{source}] Done: {len(records)} creators")
     return records
 
-# ══════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
 # Main
-# ══════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
 def main():
     log.info("="*60)
-    log.info(f"MediaIndex scraper | eporner={ENABLE_EPORNER} kemono={ENABLE_KEMONO} coomer={ENABLE_COOMER}")
+    log.info(f"MediaIndex | eporner={ENABLE_EPORNER} kemono={ENABLE_KEMONO} coomer={ENABLE_COOMER}")
     log.info("="*60)
     albums, new_count = load_existing(), 0
 
@@ -200,12 +203,14 @@ def main():
                 albums[rec["id"]] = rec; new_count += 1
 
     if ENABLE_KEMONO:
-        for rec in scrape_creators("https://kemono.su", "kemono", MAX_MODELS):
+        # kemono.su → kemono.cr (July 2025 domain change)
+        for rec in scrape_creators("https://kemono.cr", "kemono", MAX_MODELS):
             if rec["id"] not in albums:
                 albums[rec["id"]] = rec; new_count += 1
 
     if ENABLE_COOMER:
-        for rec in scrape_creators("https://coomer.su", "coomer", MAX_MODELS):
+        # coomer.su → coomer.st (July 2025 domain change)
+        for rec in scrape_creators("https://coomer.st", "coomer", MAX_MODELS):
             if rec["id"] not in albums:
                 albums[rec["id"]] = rec; new_count += 1
 
