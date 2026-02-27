@@ -182,23 +182,56 @@ def scrape_eporner_models(max_models: int) -> List[Dict[str, Any]]:
     return records
 
 # -------------------- Kemono / Coomer (bulk JSON) --------------------
+import requests
+
 def scrape_kemono_creators(base_url: str, source: str, max_models: int):
     """
-    Uses public .su endpoints instead of api.kemono.party / api.coomer.party
-    This avoids GitHub Actions DNS failures.
+    DNS-bypass version.
+    Uses direct IP with manual Host header.
     """
 
     if source == "kemono":
-        base = "https://kemono.su"
+        host = "kemono.su"
     else:
-        base = "https://coomer.su"
+        host = "coomer.su"
 
-    log.info(f"[{source}] Fetching creators list from {base}")
+    # Hardcoded IPs (current as of 2026 — may need updating later)
+    ip_map = {
+        "kemono.su": "172.67.205.156",
+        "coomer.su": "172.67.205.156"
+    }
 
-    data = fetch_json(f"{base}/api/v1/creators")
+    ip = ip_map.get(host)
+    if not ip:
+        log.error(f"[{source}] No IP mapping found")
+        return
 
-    if not data:
-        log.error(f"[{source}] Failed to fetch creators — got no data")
+    url = f"https://{ip}/api/v1/creators"
+
+    log.info(f"[{source}] Fetching creators list via IP {ip}")
+
+    try:
+        response = requests.get(
+            url,
+            headers={
+                "Host": host,
+                "User-Agent": "Mozilla/5.0"
+            },
+            timeout=30,
+            verify=False  # required because cert won't match IP
+        )
+    except Exception as e:
+        log.error(f"[{source}] Request failed: {e}")
+        return
+
+    if response.status_code != 200:
+        log.error(f"[{source}] HTTP {response.status_code}")
+        return
+
+    try:
+        data = response.json()
+    except Exception:
+        log.error(f"[{source}] Invalid JSON response")
         return
 
     count = 0
@@ -216,7 +249,7 @@ def scrape_kemono_creators(base_url: str, source: str, max_models: int):
 
         yield {
             "name": name,
-            "url": f"{base}/{service}/user/{cid}",
+            "url": f"https://{host}/{service}/user/{cid}",
             "source": source
         }
 
