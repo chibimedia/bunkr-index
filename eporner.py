@@ -1,164 +1,232 @@
-"""
-scrapers/eporner.py — Eporner.com API scraper
-
-Fetch method: plain requests (official JSON API, no Cloudflare)
-
-API endpoint: https://www.eporner.com/api/v2/video/search/
-Params:
-  query      = search term (use "all" for all videos)
-  per_page   = 1-1000 (we use 100)
-  page       = page number (1 to total_pages)
-  thumbsize  = "big" (640x360)
-  order      = "latest" | "top-rated" | "most-popular" | "top-weekly" | ...
-  gay        = 0 (exclude)
-  lq         = 1 (include all quality levels)
-  format     = "json"
-
-Response fields per video:
-  id, title, keywords, views, rate, url, added, length_sec, length_min,
-  embed, default_thumb {src, width, height}, thumbs [{src}]
-
-No auth required. No Cloudflare on API endpoint (confirmed via direct fetch).
-"""
-from __future__ import annotations
-
-import logging
 import os
+import re
+import time
+import random
+import json
+import logging
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Optional, List
 
-from fetcher import fetch_json
-from index import now_iso
+import requests
+from bs4 import BeautifulSoup
 
-log = logging.getLogger(__name__)
+# -----------------------------------------------------------------------------
+# Configuration
+# -----------------------------------------------------------------------------
 
-BASE_URL  = "https://www.eporner.com/api/v2/video/search/"
-MAX_NEW   = int(os.getenv("MAX_ALBUMS", "500"))
-PER_PAGE  = 100  # max useful without excessive requests
+BASE_URL = "https://www.eporner.com"
+LISTING_URL = f"{BASE_URL}/pornstars/"
+OUTPUT_FILE = "data/eporner.jl"
 
-# Multiple search queries to get variety across different popular content
-SEARCH_QUERIES = [
-    ("latest",       "all",       "latest"),
-    ("top_weekly",   "all",       "top-weekly"),
-    ("top_monthly",  "all",       "top-monthly"),
-    ("top_rated",    "all",       "top-rated"),
-    ("most_popular", "all",       "most-popular"),
+MAX_RETRIES = 3
+TIMEOUT = 15
+
+USER_AGENTS = [
+    # Static rotation pool
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
 ]
 
+# -----------------------------------------------------------------------------
+# Logging
+# -----------------------------------------------------------------------------
 
-def _build_url(query: str, order: str, page: int) -> str:
-    return (
-        f"{BASE_URL}?query={query}&per_page={PER_PAGE}&page={page}"
-        f"&thumbsize=big&order={order}&gay=0&lq=1&format=json"
-    )
+logger = logging.getLogger("eporner_scraper")
+logger.setLevel(logging.INFO)
+handler = logging.StreamHandler()
+handler.setFormatter(logging.Formatter("[%(levelname)s] %(message)s"))
+logger.addHandler(handler)
 
 
-def _parse_video(v: dict) -> dict:
-    vid_id   = v.get("id", "")
-    title    = (v.get("title") or "").strip()
-    url      = v.get("url") or f"https://www.eporner.com/hd-porn/{vid_id}/"
-    added    = v.get("added")
-    length_s = v.get("length_sec", 0)
-    views    = v.get("views", 0)
-    rating   = v.get("rate", "0")
-    keywords = v.get("keywords", "")
-    embed    = v.get("embed")
+# -----------------------------------------------------------------------------
+# Utilities
+# -----------------------------------------------------------------------------
 
-    # Thumbnail
-    thumb = None
-    dt = v.get("default_thumb")
-    if dt and dt.get("src"):
-        thumb = dt["src"]
-    elif v.get("thumbs"):
-        thumb = v["thumbs"][0].get("src")
+def normalize_name(name: str) -> str:
+    """
+    Lowercase, trim, collapse multiple spaces.
+    Hyphens are preserved exactly as requested.
+    """
+    name = name.strip().lower()
+    name = re.sub(r"\s+", " ", name)
+    return name
 
-    # Parse date
-    date_str = None
-    if added:
+
+def parse_count(text: str) -> int:
+    """
+    Parses numeric counts.
+    Handles:
+        123
+        12,345
+        1.2K
+        3.4M
+    """
+    text = text.strip().replace(",", "")
+    multiplier = 1
+
+    if text.endswith("K"):
+        multiplier = 1_000
+        text = text[:-1]
+    elif text.endswith("M"):
+        multiplier = 1_000_000
+        text = text[:-1]
+
+    try:
+        return int(float(text) * multiplier)
+    except ValueError:
+        return 0
+
+
+def polite_delay():
+    time.sleep(random.uniform(1.5, 2.5))
+
+
+def fetch_with_retries(url: str) -> Optional[requests.Response]:
+    for attempt in range(1, MAX_RETRIES + 1):
         try:
-            dt_parsed = datetime.strptime(added, "%Y-%m-%d %H:%M:%S")
-            date_str = dt_parsed.replace(tzinfo=timezone.utc).isoformat()
-        except Exception:
-            pass
+            headers = {"User-Agent": random.choice(USER_AGENTS)}
+            response = requests.get(url, headers=headers, timeout=TIMEOUT)
 
-    return {
-        "id":            f"eporner:{vid_id}",
-        "title":         title,
-        "source":        "eporner",
-        "url":           url,
-        "thumbnail":     thumb,
-        "file_count":    1,
-        "photo_count":   0,
-        "video_count":   1,
-        "has_videos":    True,
-        "date":          date_str,
-        "indexed_at":    now_iso(),
-        "needs_recheck": not title or len(title) < 3,
-        "extra": {
-            "length_sec": length_s,
-            "length_min": v.get("length_min"),
-            "views":      views,
-            "rating":     rating,
-            "keywords":   keywords[:300],
-            "embed":      embed,
-        },
-    }
+            if response.status_code == 200:
+                return response
+
+            logger.warning(f"Non-200 status {response.status_code} for {url}")
+
+        except requests.RequestException as e:
+            logger.warning(f"Request error (attempt {attempt}) for {url}: {e}")
+
+        backoff = 2 ** attempt
+        time.sleep(backoff)
+
+    logger.error(f"Failed after retries: {url}")
+    return None
 
 
-def scrape(max_videos: int = MAX_NEW) -> list[dict]:
+# -----------------------------------------------------------------------------
+# Parsing Logic
+# -----------------------------------------------------------------------------
+
+def extract_total_pages(soup: BeautifulSoup) -> int:
     """
-    Fetch videos from Eporner API across multiple sort orders.
-    Deduplicates by video id.
+    Extracts pagination max page.
+    Assumes traditional pagination links like /pornstars/2/
     """
-    records: list[dict] = {}
-    log.info(f"[eporner] Starting API scrape (target: {max_videos} videos)")
+    pagination = soup.find_all("a", href=True)
+    max_page = 1
 
-    for label, query, order in SEARCH_QUERIES:
-        if len(records) >= max_videos:
-            break
+    for link in pagination:
+        href = link["href"]
+        match = re.search(r"/pornstars/(\d+)/", href)
+        if match:
+            page_num = int(match.group(1))
+            max_page = max(max_page, page_num)
 
-        log.info(f"[eporner] Query: {label}")
-        page = 1
-        total_pages = None
+    return max_page
 
-        while len(records) < max_videos:
-            url  = _build_url(query, order, page)
-            data = fetch_json(url)
 
-            if data is None:
-                log.warning(f"[eporner] API returned None for {url}")
-                break
+def parse_listing_page(soup: BeautifulSoup) -> List[dict]:
+    """
+    Extracts model entries from a listing page.
+    Assumes counts visible on listing.
+    """
+    results = []
 
-            if not isinstance(data, dict):
-                log.warning(f"[eporner] Unexpected response type: {type(data)}")
-                break
+    # Adjust selector if needed after testing live HTML
+    model_cards = soup.select(".pornstar-card, .ps-card, .model-item")
 
-            if total_pages is None:
-                total_pages = data.get("total_pages", 1)
-                log.info(f"[eporner] {label}: {data.get('total_count')} total videos, {total_pages} pages")
+    for card in model_cards:
+        try:
+            name_tag = card.find("a", href=True)
+            if not name_tag:
+                continue
 
-            videos = data.get("videos") or []
-            if not videos:
-                break
+            display_name = name_tag.get_text(strip=True)
+            profile_url = BASE_URL + name_tag["href"]
 
-            new_here = 0
-            for v in videos:
-                try:
-                    record = _parse_video(v)
-                except Exception as e:
-                    log.warning(f"[eporner] Error parsing video: {e}")
-                    continue
+            stats_text = card.get_text(" ", strip=True)
 
-                if record["id"] not in records:
-                    records[record["id"]] = record
-                    new_here += 1
+            # Attempt to extract counts heuristically
+            video_match = re.search(r"([\d.,KM]+)\s+Videos?", stats_text, re.I)
+            image_match = re.search(r"([\d.,KM]+)\s+Photos?", stats_text, re.I)
 
-            log.info(f"[eporner] {label} p{page}: {len(videos)} videos, {new_here} new ({len(records)} total)")
+            videos = parse_count(video_match.group(1)) if video_match else 0
+            images = parse_count(image_match.group(1)) if image_match else 0
+            total = videos + images
 
-            if page >= (total_pages or 1):
-                break
-            page += 1
+            normalized = normalize_name(display_name)
 
-    result = list(records.values())
-    log.info(f"[eporner] Done: {len(result)} videos")
-    return result
+            entry = {
+                "normalized_name": normalized,
+                "display_name": display_name,
+                "source": "eporner",
+                "entry_type": "profile",
+                "media": {
+                    "videos": videos,
+                    "images": images,
+                    "total": total,
+                },
+                "url": profile_url,
+                "last_updated": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+            }
+
+            results.append(entry)
+
+        except Exception as e:
+            logger.warning(f"Failed parsing card: {e}")
+            continue
+
+    return results
+
+
+# -----------------------------------------------------------------------------
+# Main Scraper
+# -----------------------------------------------------------------------------
+
+def run():
+    logger.info("Starting Eporner scraper")
+
+    os.makedirs("data", exist_ok=True)
+
+    response = fetch_with_retries(LISTING_URL)
+    if not response:
+        logger.error("Failed to fetch initial listing page.")
+        return
+
+    soup = BeautifulSoup(response.text, "lxml")
+
+    total_pages = extract_total_pages(soup)
+    logger.info(f"Detected {total_pages} pages")
+
+    # Overwrite file each run
+    with open(OUTPUT_FILE, "w", encoding="utf-8") as outfile:
+
+        for page in range(1, total_pages + 1):
+            if page == 1:
+                page_url = LISTING_URL
+            else:
+                page_url = f"{BASE_URL}/pornstars/{page}/"
+
+            logger.info(f"Fetching page {page}/{total_pages}")
+
+            resp = fetch_with_retries(page_url)
+            if not resp:
+                logger.warning(f"Skipping page {page}")
+                continue
+
+            soup = BeautifulSoup(resp.text, "lxml")
+            entries = parse_listing_page(soup)
+
+            for entry in entries:
+                outfile.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+            polite_delay()
+
+    logger.info("Eporner scraper complete")
+
+
+if __name__ == "__main__":
+    run()
