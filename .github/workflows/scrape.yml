@@ -1,77 +1,40 @@
-name: Scrape & Index
+name: Scrape and Build Index
 
 on:
   schedule:
-    - cron: "0 */6 * * *"
+    - cron: "0 3 * * 1"  # Weekly at 03:00 UTC
   workflow_dispatch:
-    inputs:
-      max_models:
-        description: "Max models per source"
-        default: "2000"
-        required: false
-      force_commit:
-        description: "Bypass commit guard"
-        default: "false"
-        type: choice
-        options: ["false", "true"]
-
-permissions:
-  contents: write
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
 
     steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-      # Use Google DNS — GitHub's default resolver can fail on .cr / .su / .st TLDs
-      - name: Configure DNS
-        run: |
-          echo "nameserver 8.8.8.8" | sudo tee /etc/resolv.conf
-          echo "nameserver 8.8.4.4" | sudo tee -a /etc/resolv.conf
-          # Verify resolution
-          nslookup kemono.cr 8.8.8.8 || echo "kemono.cr lookup failed"
-          nslookup coomer.st 8.8.8.8 || echo "coomer.st lookup failed"
-
-      - uses: actions/setup-python@v5
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
-          cache: "pip"
+          python-version: "3.11"
 
       - name: Install dependencies
-        run: pip install requests cloudscraper beautifulsoup4 lxml
+        run: pip install -r requirements.txt
 
-      - name: Run scraper
-        env:
-          MAX_MODELS:     ${{ github.event.inputs.max_models || '2000' }}
-          ENABLE_KEMONO:  "true"
-          ENABLE_COOMER:  "true"
-          ENABLE_EPORNER: "true"
-          FORCE_COMMIT:   ${{ github.event.inputs.force_commit || 'false' }}
-          DELAY:          "1.5"
+      - name: Run scraper pipeline
         run: python scraper.py
 
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: run-${{ github.run_number }}
-          path: |
-            albums.json
-            validation.json
-          retention-days: 14
-
-      - name: Commit
+      - name: Commit updated index.json
         run: |
-          git config user.name  "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          TOTAL=$(python -c "import json; print(json.load(open('validation.json')).get('total',0))" 2>/dev/null || echo 0)
-          NEW=$(python   -c "import json; print(json.load(open('validation.json')).get('new_this_run',0))" 2>/dev/null || echo 0)
-          git add albums.json validation.json
-          git diff --staged --quiet && echo "No changes." && exit 0
-          git commit -m "index: ${TOTAL} records (+${NEW} new) [skip ci]"
-          git push
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+
+          git add site/index.json
+
+          if git diff --cached --quiet; then
+            echo "No changes detected"
+          else
+            TOTAL=$(python -c "import json; print(json.load(open('site/index.json'))['total_entries'])")
+            git commit -m "index: ${TOTAL} records [skip ci]"
+            git push
+          fi
