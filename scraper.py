@@ -1,6 +1,7 @@
 import logging
 
 from scrapers import eporner
+import processor
 
 logger = logging.getLogger("scraper_orchestrator")
 logger.setLevel(logging.INFO)
@@ -10,10 +11,6 @@ logger.addHandler(handler)
 
 
 def run_scrapers():
-    """
-    Runs all source scrapers.
-    Failures in one source should not crash the pipeline.
-    """
     try:
         logger.info("Running Eporner scraper...")
         eporner.run()
@@ -23,8 +20,16 @@ def run_scrapers():
 
 def main():
     logger.info("Starting scraper pipeline")
+
     run_scrapers()
-    logger.info("Scraper pipeline finished")
+
+    try:
+        logger.info("Running processor...")
+        processor.run()
+    except Exception as e:
+        logger.error(f"Processor failed: {e}")
+
+    logger.info("Pipeline complete")
 
 
 if __name__ == "__main__":
