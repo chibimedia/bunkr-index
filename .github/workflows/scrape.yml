@@ -34,7 +34,7 @@ jobs:
           if git diff --cached --quiet; then
             echo "No changes detected"
           else
-            TOTAL=$(python -c "import json; print(json.load(open('site/index.json'))['total_entries'])")
+            TOTAL=$(python -c "import json; print(json.load(open('docs/index.json'))['total_entries'])")
             git commit -m "index: ${TOTAL} records [skip ci]"
             git push
           fi
