@@ -1,26 +1,37 @@
-import asyncio
 import json
 import os
 import re
-from playwright.async_api import async_playwright
+import time
+import cloudscraper
+from bs4 import BeautifulSoup
 
 BASE_URL = "https://www.eporner.com/pornstar-list/"
 OUTPUT_FILE = "data/eporner.jl"
 
+AGE_GATE_COOKIES = {
+    "age_verified": "1",
+    "bs": "1"
+}
 
-async def get_total_pages(page):
+scraper = cloudscraper.create_scraper(
+    browser={
+        "browser": "chrome",
+        "platform": "windows",
+        "mobile": False
+    }
+)
+
+
+def get_total_pages():
     print("[INFO] Detecting total pages...")
-    await page.goto(BASE_URL, wait_until="networkidle")
+    r = scraper.get(BASE_URL, cookies=AGE_GATE_COOKIES, timeout=30)
+    soup = BeautifulSoup(r.text, "html.parser")
 
-    links = await page.locator("a").all()
     pages = []
-
-    for link in links:
-        href = await link.get_attribute("href")
-        if href:
-            match = re.search(r"/pornstar-list/(\d+)/", href)
-            if match:
-                pages.append(int(match.group(1)))
+    for link in soup.find_all("a", href=True):
+        match = re.search(r"/pornstar-list/(\d+)/", link["href"])
+        if match:
+            pages.append(int(match.group(1)))
 
     if not pages:
         print("[WARN] Could not detect pagination. Defaulting to 1 page.")
@@ -31,33 +42,33 @@ async def get_total_pages(page):
     return total
 
 
-async def scrape_page(page, page_number):
+def scrape_page(page_number):
     if page_number == 1:
         url = BASE_URL
     else:
         url = f"{BASE_URL}{page_number}/"
 
     print(f"[INFO] Fetching {url}")
-    await page.goto(url, wait_until="networkidle")
+    r = scraper.get(url, cookies=AGE_GATE_COOKIES, timeout=30)
+    soup = BeautifulSoup(r.text, "html.parser")
 
-    content = await page.content()
+    text = soup.get_text("\n")
+    lines = text.split("\n")
 
     models = []
-    lines = content.split("\n")
 
     for i in range(len(lines)):
         line = lines[i].strip()
 
-        if "Videos:" in line:
+        if line.startswith("Videos:"):
             try:
-                videos_match = re.search(r"Videos:\s*([\d,]+)", line)
-                photos_match = re.search(r"Photos:\s*([\d,]+)", lines[i + 1])
+                videos = int(re.sub(r"[^\d]", "", line))
+                photos_line = lines[i + 1].strip()
 
-                if videos_match and photos_match:
-                    videos = int(videos_match.group(1).replace(",", ""))
-                    photos = int(photos_match.group(1).replace(",", ""))
-
+                if photos_line.startswith("Photos:"):
+                    photos = int(re.sub(r"[^\d]", "", photos_line))
                     name = lines[i - 1].strip()
+
                     if name and videos > 0:
                         models.append({
                             "name": name,
@@ -65,6 +76,7 @@ async def scrape_page(page, page_number):
                             "photos": photos,
                             "source": "eporner"
                         })
+
             except Exception:
                 continue
 
@@ -72,42 +84,17 @@ async def scrape_page(page, page_number):
     return models
 
 
-async def main_async():
-    print("[INFO] Starting Eporner scraper (Playwright)")
-
+def run():
+    print("[INFO] Starting Eporner scraper (cloudscraper)")
     os.makedirs("data", exist_ok=True)
 
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        context = await browser.new_context()
+    total_pages = get_total_pages()
+    all_models = []
 
-        # Inject age gate cookies
-        await context.add_cookies([
-            {
-                "name": "age_verified",
-                "value": "1",
-                "domain": ".eporner.com",
-                "path": "/"
-            },
-            {
-                "name": "bs",
-                "value": "1",
-                "domain": ".eporner.com",
-                "path": "/"
-            }
-        ])
-
-        page = await context.new_page()
-
-        total_pages = await get_total_pages(page)
-
-        all_models = []
-
-        for page_number in range(1, total_pages + 1):
-            models = await scrape_page(page, page_number)
-            all_models.extend(models)
-
-        await browser.close()
+    for page in range(1, total_pages + 1):
+        models = scrape_page(page)
+        all_models.extend(models)
+        time.sleep(1)
 
     print(f"[INFO] Total models scraped: {len(all_models)}")
 
@@ -116,10 +103,6 @@ async def main_async():
             f.write(json.dumps(model) + "\n")
 
     print("[INFO] Eporner scraper complete")
-
-
-def run():
-    asyncio.run(main_async())
 
 
 if __name__ == "__main__":
