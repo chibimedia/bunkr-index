@@ -1,92 +1,113 @@
-import requests
-from bs4 import BeautifulSoup
+import asyncio
 import json
-import re
 import os
-import time
+import re
+from playwright.async_api import async_playwright
 
 BASE_URL = "https://www.eporner.com/pornstar-list/"
-HEADERS = {
-    "User-Agent": "Mozilla/5.0"
-}
-
 OUTPUT_FILE = "data/eporner.jl"
 
 
-def get_total_pages():
+async def get_total_pages(page):
     print("[INFO] Detecting total pages...")
-    r = requests.get(BASE_URL, headers=HEADERS, timeout=30)
-    soup = BeautifulSoup(r.text, "html.parser")
+    await page.goto(BASE_URL, wait_until="networkidle")
 
-    pagination_links = soup.find_all("a", href=True)
+    links = await page.locator("a").all()
     pages = []
 
-    for link in pagination_links:
-        match = re.search(r"/pornstar-list/(\d+)/", link["href"])
-        if match:
-            pages.append(int(match.group(1)))
+    for link in links:
+        href = await link.get_attribute("href")
+        if href:
+            match = re.search(r"/pornstar-list/(\d+)/", href)
+            if match:
+                pages.append(int(match.group(1)))
 
     if not pages:
         print("[WARN] Could not detect pagination. Defaulting to 1 page.")
         return 1
 
-    total_pages = max(pages)
-    print(f"[INFO] Detected {total_pages} pages")
-    return total_pages
+    total = max(pages)
+    print(f"[INFO] Detected {total} pages")
+    return total
 
 
-def scrape_page(page_number):
+async def scrape_page(page, page_number):
     if page_number == 1:
         url = BASE_URL
     else:
         url = f"{BASE_URL}{page_number}/"
 
     print(f"[INFO] Fetching {url}")
-    r = requests.get(url, headers=HEADERS, timeout=30)
-    soup = BeautifulSoup(r.text, "html.parser")
+    await page.goto(url, wait_until="networkidle")
+
+    content = await page.content()
 
     models = []
+    lines = content.split("\n")
 
-    # Find all links to model pages
-    links = soup.find_all("a", href=True)
+    for i in range(len(lines)):
+        line = lines[i].strip()
 
-    for link in links:
-        href = link["href"]
+        if "Videos:" in line:
+            try:
+                videos_match = re.search(r"Videos:\s*([\d,]+)", line)
+                photos_match = re.search(r"Photos:\s*([\d,]+)", lines[i + 1])
 
-        if "/model/" in href:
-            name = link.get_text(strip=True)
+                if videos_match and photos_match:
+                    videos = int(videos_match.group(1).replace(",", ""))
+                    photos = int(photos_match.group(1).replace(",", ""))
 
-            parent_text = link.parent.get_text("\n", strip=True)
-
-            videos_match = re.search(r"Videos:\s*([\d,]+)", parent_text)
-            photos_match = re.search(r"Photos:\s*([\d,]+)", parent_text)
-
-            if videos_match and photos_match and name:
-                videos = int(videos_match.group(1).replace(",", ""))
-                photos = int(photos_match.group(1).replace(",", ""))
-
-                models.append({
-                    "name": name,
-                    "videos": videos,
-                    "photos": photos,
-                    "source": "eporner"
-                })
+                    name = lines[i - 1].strip()
+                    if name and videos > 0:
+                        models.append({
+                            "name": name,
+                            "videos": videos,
+                            "photos": photos,
+                            "source": "eporner"
+                        })
+            except Exception:
+                continue
 
     print(f"[INFO] → {len(models)} models found on page {page_number}")
     return models
 
-def main():
-    print("[INFO] Starting Eporner scraper")
+
+async def main_async():
+    print("[INFO] Starting Eporner scraper (Playwright)")
 
     os.makedirs("data", exist_ok=True)
 
-    total_pages = get_total_pages()
-    all_models = []
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        context = await browser.new_context()
 
-    for page in range(1, total_pages + 1):
-        models = scrape_page(page)
-        all_models.extend(models)
-        time.sleep(1)
+        # Inject age gate cookies
+        await context.add_cookies([
+            {
+                "name": "age_verified",
+                "value": "1",
+                "domain": ".eporner.com",
+                "path": "/"
+            },
+            {
+                "name": "bs",
+                "value": "1",
+                "domain": ".eporner.com",
+                "path": "/"
+            }
+        ])
+
+        page = await context.new_page()
+
+        total_pages = await get_total_pages(page)
+
+        all_models = []
+
+        for page_number in range(1, total_pages + 1):
+            models = await scrape_page(page, page_number)
+            all_models.extend(models)
+
+        await browser.close()
 
     print(f"[INFO] Total models scraped: {len(all_models)}")
 
@@ -98,7 +119,8 @@ def main():
 
 
 def run():
-    main()
+    asyncio.run(main_async())
+
 
 if __name__ == "__main__":
     run()
