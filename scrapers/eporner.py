@@ -1,285 +1,110 @@
-import os
-import re
-import time
-import random
-import json
-import logging
-from datetime import datetime, timezone
-from typing import Optional, List
-
 import requests
 from bs4 import BeautifulSoup
+import json
+import re
+import os
+import time
 
-# -----------------------------------------------------------------------------
-# Configuration
-# -----------------------------------------------------------------------------
-
-BASE_URL = "https://www.eporner.com"
-LISTING_URL = f"{BASE_URL}/pornstar-list/1/"   # FIX: was /pornstars/
-OUTPUT_FILE = "data/eporner.jl"
-
-MAX_RETRIES = 3
-TIMEOUT = 15
-
-USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
-]
-
-# FIX: Age gate bypass cookies. Eporner sets these after age confirmation.
-# If the site ever rejects these, re-visit in a browser, copy fresh cookies
-# from DevTools → Application → Cookies, and update here (or store as
-# GitHub Actions secrets and load via os.environ).
-AGE_GATE_COOKIES = {
-    "age_verified": "1",
-    "bs": "1",
+BASE_URL = "https://www.eporner.com/pornstar-list/"
+HEADERS = {
+    "User-Agent": "Mozilla/5.0"
 }
 
-# -----------------------------------------------------------------------------
-# Logging
-# -----------------------------------------------------------------------------
-
-logger = logging.getLogger("eporner_scraper")
-logger.setLevel(logging.INFO)
-handler = logging.StreamHandler()
-handler.setFormatter(logging.Formatter("[%(levelname)s] %(message)s"))
-logger.addHandler(handler)
+OUTPUT_FILE = "data/eporner.jl"
 
 
-# -----------------------------------------------------------------------------
-# Utilities
-# -----------------------------------------------------------------------------
+def get_total_pages():
+    print("[INFO] Detecting total pages...")
+    r = requests.get(BASE_URL, headers=HEADERS, timeout=30)
+    soup = BeautifulSoup(r.text, "html.parser")
 
-def normalize_name(name: str) -> str:
-    name = name.strip().lower()
-    name = re.sub(r"\s+", " ", name)
-    return name
+    pagination_links = soup.find_all("a", href=True)
+    pages = []
 
-
-def parse_count(text: str) -> int:
-    text = text.strip().replace(",", "")
-    multiplier = 1
-    if text.endswith("K"):
-        multiplier = 1_000
-        text = text[:-1]
-    elif text.endswith("M"):
-        multiplier = 1_000_000
-        text = text[:-1]
-    try:
-        return int(float(text) * multiplier)
-    except ValueError:
-        return 0
-
-
-def polite_delay():
-    time.sleep(random.uniform(1.5, 2.5))
-
-
-def fetch_with_retries(url: str) -> Optional[requests.Response]:
-    for attempt in range(1, MAX_RETRIES + 1):
-        try:
-            headers = {
-                "User-Agent": random.choice(USER_AGENTS),
-                "Referer": BASE_URL + "/",
-                "Accept-Language": "en-US,en;q=0.9",
-            }
-            response = requests.get(
-                url,
-                headers=headers,
-                cookies=AGE_GATE_COOKIES,   # FIX: attach age gate cookies
-                timeout=TIMEOUT,
-            )
-
-            if response.status_code == 200:
-                # FIX: sanity-check we didn't land on the age gate
-                if "age_verified" in response.url or "Want to watch FREE porn" in response.text[:500]:
-                    logger.error(
-                        "Age gate detected — cookies not working. "
-                        "Update AGE_GATE_COOKIES with fresh values from your browser."
-                    )
-                    return None
-                return response
-
-            logger.warning(f"Non-200 status {response.status_code} for {url}")
-
-        except requests.RequestException as e:
-            logger.warning(f"Request error (attempt {attempt}) for {url}: {e}")
-
-        backoff = 2 ** attempt
-        time.sleep(backoff)
-
-    logger.error(f"Failed after retries: {url}")
-    return None
-
-
-# -----------------------------------------------------------------------------
-# Parsing Logic
-# -----------------------------------------------------------------------------
-
-def extract_total_pages(soup: BeautifulSoup) -> int:
-    """
-    FIX: Updated for /pornstar-list/N/ URL pattern.
-    Also falls back to checking a 'last page' or disabled-next-button pattern
-    in case the highest numbered link isn't directly visible.
-    """
-    max_page = 1
-
-    # Primary: scan all hrefs for /pornstar-list/N/
-    for link in soup.find_all("a", href=True):
-        href = link["href"]
-        match = re.search(r"/pornstar-list/(\d+)/", href)
+    for link in pagination_links:
+        match = re.search(r"/pornstar-list/(\d+)/", link["href"])
         if match:
-            page_num = int(match.group(1))
-            max_page = max(max_page, page_num)
+            pages.append(int(match.group(1)))
 
-    # Fallback: look for a text node that says something like "Page 1 of 47"
-    page_of_match = re.search(r"Page\s+\d+\s+of\s+(\d+)", soup.get_text(), re.I)
-    if page_of_match:
-        max_page = max(max_page, int(page_of_match.group(1)))
+    if not pages:
+        print("[WARN] Could not detect pagination. Defaulting to 1 page.")
+        return 1
 
-    if max_page == 1:
-        logger.warning(
-            "Could not detect multiple pages — either the cookies aren't working "
-            "or the pagination HTML structure has changed. Only page 1 will be scraped."
-        )
-
-    return max_page
+    total_pages = max(pages)
+    print(f"[INFO] Detected {total_pages} pages")
+    return total_pages
 
 
-def parse_listing_page(soup: BeautifulSoup) -> List[dict]:
-    """
-    Extracts model entries from a listing page.
+def scrape_page(page_number):
+    if page_number == 1:
+        url = BASE_URL
+    else:
+        url = f"{BASE_URL}{page_number}/"
 
-    FIX: Broadened selectors. The original .pornstar-card / .ps-card / .model-item
-    selectors were guesses. We now try a wider net and also attempt to match
-    the lightweight structure Brave sees (name + vid count + photo count).
+    print(f"[INFO] Fetching {url}")
+    r = requests.get(url, headers=HEADERS, timeout=30)
+    soup = BeautifulSoup(r.text, "html.parser")
 
-    If you open DevTools on the live page, look for the repeating container
-    wrapping each model block and update MODEL_CARD_SELECTORS accordingly.
-    """
-    results = []
+    models = []
 
-    MODEL_CARD_SELECTORS = [
-        # Add the real selector here once confirmed via DevTools, e.g.:
-        # ".pscard", ".pornstar-wrap", "div.item",
-        ".pornstar-card",
-        ".ps-card",
-        ".model-item",
-        # Generic fallback: any <li> or <div> containing a /pornstar/ link
-    ]
+    # Each model entry appears as plain text with:
+    # Model Name
+    # Videos: X
+    # Photos: Y
 
-    model_cards = []
-    for selector in MODEL_CARD_SELECTORS:
-        model_cards = soup.select(selector)
-        if model_cards:
-            logger.info(f"Matched cards using selector: {selector}")
-            break
+    text_blocks = soup.get_text("\n").split("\n")
 
-    # Last-resort fallback: find all links pointing to /pornstar/<slug>/
-    if not model_cards:
-        logger.warning("No cards matched known selectors — falling back to pornstar link scan")
-        for link in soup.find_all("a", href=re.compile(r"^/pornstar/[^/]+/$")):
-            # Treat the link's parent container as the card
-            parent = link.parent
-            if parent:
-                model_cards.append(parent)
+    for i in range(len(text_blocks)):
+        line = text_blocks[i].strip()
 
-    for card in model_cards:
-        try:
-            name_tag = card.find("a", href=re.compile(r"/pornstar/"))
-            if not name_tag:
-                # Try any anchor if the URL pattern differs
-                name_tag = card.find("a", href=True)
-            if not name_tag:
+        # Look for "Videos: X"
+        if line.startswith("Videos:"):
+            try:
+                videos = int(re.sub(r"[^\d]", "", line))
+
+                photos_line = text_blocks[i + 1].strip()
+                if photos_line.startswith("Photos:"):
+                    photos = int(re.sub(r"[^\d]", "", photos_line))
+
+                    # Model name is usually 1 line above "Videos:"
+                    name = text_blocks[i - 1].strip()
+
+                    if name and videos > 0:
+                        models.append({
+                            "name": name,
+                            "videos": videos,
+                            "photos": photos,
+                            "source": "eporner"
+                        })
+
+            except Exception:
                 continue
 
-            display_name = name_tag.get_text(strip=True)
-            if not display_name:
-                continue
-
-            href = name_tag["href"]
-            profile_url = href if href.startswith("http") else BASE_URL + href
-
-            stats_text = card.get_text(" ", strip=True)
-
-            video_match = re.search(r"([\d.,KM]+)\s*Videos?", stats_text, re.I)
-            image_match = re.search(r"([\d.,KM]+)\s*Photos?", stats_text, re.I)
-
-            videos = parse_count(video_match.group(1)) if video_match else 0
-            images = parse_count(image_match.group(1)) if image_match else 0
-            total = videos + images
-
-            entry = {
-                "normalized_name": normalize_name(display_name),
-                "display_name": display_name,
-                "source": "eporner",
-                "entry_type": "profile",
-                "media": {
-                    "videos": videos,
-                    "images": images,
-                    "total": total,
-                },
-                "url": profile_url,
-                "last_updated": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
-            }
-
-            results.append(entry)
-
-        except Exception as e:
-            logger.warning(f"Failed parsing card: {e}")
-            continue
-
-    return results
+    print(f"[INFO] → {len(models)} models found on page {page_number}")
+    return models
 
 
-# -----------------------------------------------------------------------------
-# Main Scraper
-# -----------------------------------------------------------------------------
-
-def run():
-    logger.info("Starting Eporner scraper")
+def main():
+    print("[INFO] Starting Eporner scraper")
 
     os.makedirs("data", exist_ok=True)
 
-    response = fetch_with_retries(LISTING_URL)
-    if not response:
-        logger.error("Failed to fetch initial listing page.")
-        return
+    total_pages = get_total_pages()
+    all_models = []
 
-    soup = BeautifulSoup(response.text, "lxml")
+    for page in range(1, total_pages + 1):
+        models = scrape_page(page)
+        all_models.extend(models)
+        time.sleep(1)
 
-    total_pages = extract_total_pages(soup)
-    logger.info(f"Detected {total_pages} pages")
+    print(f"[INFO] Total models scraped: {len(all_models)}")
 
-    with open(OUTPUT_FILE, "w", encoding="utf-8") as outfile:
+    with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
+        for model in all_models:
+            f.write(json.dumps(model) + "\n")
 
-        for page in range(1, total_pages + 1):
-            # FIX: correct URL pattern for all pages
-            page_url = f"{BASE_URL}/pornstar-list/{page}/"
-
-            logger.info(f"Fetching page {page}/{total_pages}")
-
-            resp = fetch_with_retries(page_url)
-            if not resp:
-                logger.warning(f"Skipping page {page}")
-                continue
-
-            page_soup = BeautifulSoup(resp.text, "lxml")
-            entries = parse_listing_page(page_soup)
-
-            logger.info(f"  → {len(entries)} models found on page {page}")
-
-            for entry in entries:
-                outfile.write(json.dumps(entry, ensure_ascii=False) + "\n")
-
-            polite_delay()
-
-    logger.info("Eporner scraper complete")
+    print("[INFO] Eporner scraper complete")
 
 
 if __name__ == "__main__":
-    run()
+    main()
