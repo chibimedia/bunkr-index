@@ -37,28 +37,39 @@ def scrape_page(page_number):
     soup = BeautifulSoup(r.text, "html.parser")
     models = []
 
-    for link in soup.find_all("a", href=re.compile(r"/pornstar/[^/]+/$")):
-        try:
-            display_name = link.get_text(strip=True)
-            if not display_name:
-                continue
+  for link in soup.find_all("a", href=re.compile(r"/pornstar/[^/]+/$")):
+    try:
+        display_name = link.get_text(strip=True)
+        if not display_name:
+            continue
 
-            profile_url = "https://www.eporner.com" + link["href"]
+        profile_url = "https://www.eporner.com" + link["href"]
 
-            # Walk up DOM to find container with stats
-            container = link
-            for _ in range(5):
-                container = container.parent
-                if container is None:
-                    break
-                if re.search(r"Videos?", container.get_text(), re.I):
-                    break
+        # Walk up DOM to find a container that has stats
+        container = link
+        stats = ""
+        for _ in range(6):
+            container = container.parent
+            if container is None:
+                break
+            text = container.get_text(" ", strip=True)
+            if re.search(r"\d+\s*Videos?", text, re.I):
+                stats = text
+                break
 
-            stats = container.get_text(" ", strip=True) if container else ""
-            vid_match = re.search(r"([\d,]+)\s*Videos?", stats, re.I)
-            img_match = re.search(r"([\d,]+)\s*Photos?", stats, re.I)
-            videos = int(vid_match.group(1).replace(",", "")) if vid_match else 0
-            images = int(img_match.group(1).replace(",", "")) if img_match else 0
+        # If walking up didn't work, try the full page text around the name
+        if not stats:
+            # Find the name in the full page text and grab surrounding context
+            full_text = soup.get_text(" ")
+            pattern = re.escape(display_name) + r".{0,200}"
+            context_match = re.search(pattern, full_text, re.I | re.DOTALL)
+            if context_match:
+                stats = context_match.group(0)
+
+        vid_match = re.search(r"([\d,]+)\s*Videos?", stats, re.I)
+        img_match = re.search(r"([\d,]+)\s*Photos?", stats, re.I)
+        videos = int(vid_match.group(1).replace(",", "")) if vid_match else 0
+        images = int(img_match.group(1).replace(",", "")) if img_match else 0
 
             models.append({
                 "normalized_name": display_name.strip().lower(),
