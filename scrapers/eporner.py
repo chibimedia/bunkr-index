@@ -37,43 +37,43 @@ def scrape_page(page_number):
     soup = BeautifulSoup(r.text, "html.parser")
     models = []
 
-  for link in soup.find_all("a", href=re.compile(r"/pornstar/[^/]+/$")):
-    try:
-        display_name = link.get_text(strip=True)
-        if not display_name:
-            continue
+    for link in soup.find_all("a", href=re.compile(r"/pornstar/[^/]+/$")):
+        try:
+            display_name = link.get_text(strip=True)
+            if not display_name:
+                continue
 
-        profile_url = "https://www.eporner.com" + link["href"]
+            profile_url = "https://www.eporner.com" + link["href"]
 
-        # Walk up DOM to find a container that has stats
-        container = link
-        stats = ""
-        for _ in range(6):
-            #temp
-            if page_number == 1 and len(models) == 0:
-    print(f"[DEBUG] Container text for '{display_name}': {container.get_text(' ', strip=True)[:300] if container else 'None'}")
-      #temp
-            container = container.parent
-            if container is None:
-                break
-            text = container.get_text(" ", strip=True)
-            if re.search(r"\d+\s*Videos?", text, re.I):
-                stats = text
-                break
+            # Walk up DOM to find a container that has stats
+            container = link
+            stats = ""
+            for _ in range(6):
+                # DEBUG: Print container text for the first model on page 1
+                if page_number == 1 and len(models) == 0:
+                    container_text = container.get_text(' ', strip=True)[:300] if container else 'None'
+                    print(f"[DEBUG] Container text for '{display_name}': {container_text}")
 
-        # If walking up didn't work, try the full page text around the name
-        if not stats:
-            # Find the name in the full page text and grab surrounding context
-            full_text = soup.get_text(" ")
-            pattern = re.escape(display_name) + r".{0,200}"
-            context_match = re.search(pattern, full_text, re.I | re.DOTALL)
-            if context_match:
-                stats = context_match.group(0)
+                container = container.parent
+                if container is None:
+                    break
+                text = container.get_text(" ", strip=True)
+                if re.search(r"\d+\s*Videos?", text, re.I):
+                    stats = text
+                    break
 
-        vid_match = re.search(r"([\d,]+)\s*Videos?", stats, re.I)
-        img_match = re.search(r"([\d,]+)\s*Photos?", stats, re.I)
-        videos = int(vid_match.group(1).replace(",", "")) if vid_match else 0
-        images = int(img_match.group(1).replace(",", "")) if img_match else 0
+            # If walking up didn't work, try the full page text around the name
+            if not stats:
+                full_text = soup.get_text(" ")
+                pattern = re.escape(display_name) + r".{0,200}"
+                context_match = re.search(pattern, full_text, re.I | re.DOTALL)
+                if context_match:
+                    stats = context_match.group(0)
+
+            vid_match = re.search(r"([\d,]+)\s*Videos?", stats, re.I)
+            img_match = re.search(r"([\d,]+)\s*Photos?", stats, re.I)
+            videos = int(vid_match.group(1).replace(",", "")) if vid_match else 0
+            images = int(img_match.group(1).replace(",", "")) if img_match else 0
 
             models.append({
                 "normalized_name": display_name.strip().lower(),
