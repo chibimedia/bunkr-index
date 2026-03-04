@@ -47,42 +47,33 @@ def scrape_page(page_number):
 
     models = []
 
-    # Each model entry appears as plain text with:
-    # Model Name
-    # Videos: X
-    # Photos: Y
+    # Find all links to model pages
+    links = soup.find_all("a", href=True)
 
-    text_blocks = soup.get_text("\n").split("\n")
+    for link in links:
+        href = link["href"]
 
-    for i in range(len(text_blocks)):
-        line = text_blocks[i].strip()
+        if "/model/" in href:
+            name = link.get_text(strip=True)
 
-        # Look for "Videos: X"
-        if line.startswith("Videos:"):
-            try:
-                videos = int(re.sub(r"[^\d]", "", line))
+            parent_text = link.parent.get_text("\n", strip=True)
 
-                photos_line = text_blocks[i + 1].strip()
-                if photos_line.startswith("Photos:"):
-                    photos = int(re.sub(r"[^\d]", "", photos_line))
+            videos_match = re.search(r"Videos:\s*([\d,]+)", parent_text)
+            photos_match = re.search(r"Photos:\s*([\d,]+)", parent_text)
 
-                    # Model name is usually 1 line above "Videos:"
-                    name = text_blocks[i - 1].strip()
+            if videos_match and photos_match and name:
+                videos = int(videos_match.group(1).replace(",", ""))
+                photos = int(photos_match.group(1).replace(",", ""))
 
-                    if name and videos > 0:
-                        models.append({
-                            "name": name,
-                            "videos": videos,
-                            "photos": photos,
-                            "source": "eporner"
-                        })
-
-            except Exception:
-                continue
+                models.append({
+                    "name": name,
+                    "videos": videos,
+                    "photos": photos,
+                    "source": "eporner"
+                })
 
     print(f"[INFO] → {len(models)} models found on page {page_number}")
     return models
-
 
 def main():
     print("[INFO] Starting Eporner scraper")
