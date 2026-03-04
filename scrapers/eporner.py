@@ -49,6 +49,10 @@ def scrape_page(page_number):
         container = link
         stats = ""
         for _ in range(6):
+            #temp
+            if page_number == 1 and len(models) == 0:
+    print(f"[DEBUG] Container text for '{display_name}': {container.get_text(' ', strip=True)[:300] if container else 'None'}")
+      #temp
             container = container.parent
             if container is None:
                 break
