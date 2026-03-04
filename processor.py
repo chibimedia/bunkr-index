@@ -5,7 +5,7 @@ from glob import glob
 from datetime import datetime, timezone
 
 DATA_DIR = "data"
-OUTPUT_DIR = "site"
+OUTPUT_DIR = "docs"
 OUTPUT_FILE = os.path.join(OUTPUT_DIR, "index.json")
 
 logger = logging.getLogger("processor")
